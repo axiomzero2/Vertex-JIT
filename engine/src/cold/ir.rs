@@ -147,6 +147,21 @@ pub enum NodeKind {
         /// Lanes per vector.
         width: u32,
     },
+    /// Vector + broadcast constant; inputs: vector, constant.
+    VecAddConst {
+        /// Lanes per vector.
+        width: u32,
+    },
+    /// Vector - broadcast constant.
+    VecSubConst {
+        /// Lanes per vector.
+        width: u32,
+    },
+    /// Vector * broadcast constant.
+    VecMulConst {
+        /// Lanes per vector.
+        width: u32,
+    },
     // ---- GC / deopt scaffolding ----
     /// Safepoint: GC-safe location with deopt state (spec 5.7.1).
     Safepoint,
@@ -240,6 +255,10 @@ impl Graph {
                 | NodeKind::Or
                 | NodeKind::Phi { .. }
                 | NodeKind::ArrayLen
+                | NodeKind::VecLoad { .. }
+                | NodeKind::VecAddConst { .. }
+                | NodeKind::VecSubConst { .. }
+                | NodeKind::VecMulConst { .. }
                 | NodeKind::ConstNum(_)
                 | NodeKind::ConstBool(_)
                 | NodeKind::ConstStr(_)
@@ -319,6 +338,9 @@ impl Graph {
                 NodeKind::Call { callee } => out.push_str(&format!("Call({callee})")),
                 NodeKind::VecLoad { width } => out.push_str(&format!("VecLoad({width})")),
                 NodeKind::VecStore { width } => out.push_str(&format!("VecStore({width})")),
+                NodeKind::VecAddConst { width } => out.push_str(&format!("VecAddConst({width})")),
+                NodeKind::VecSubConst { width } => out.push_str(&format!("VecSubConst({width})")),
+                NodeKind::VecMulConst { width } => out.push_str(&format!("VecMulConst({width})")),
                 NodeKind::Safepoint => out.push_str("Safepoint"),
                 NodeKind::UncommonTrap { reason } => {
                     out.push_str(&format!("UncommonTrap({reason:?})"))

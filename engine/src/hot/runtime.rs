@@ -68,8 +68,43 @@ pub struct TrapState {
     pub rbp: usize,
     /// Machine stack pointer at the trap site (value-stack top).
     pub rsp: usize,
-    /// Compiled code base the trap came from (engine-validated).
+    /// Return address of the trap call: identifies the site.
+    pub ret: usize,
+    /// Code base recorded by the trampoline (engine-validated).
     pub code_base: usize,
+}
+
+/// True when the trap happened in the trampoline-called function itself
+/// (single machine frame): the saved rbp chain must terminate at the
+/// trampoline frame.
+///
+/// CEP:WHAT: Frame-depth check.
+/// CEP:WHY: Cross-frame deopt is documented as pending (CEP-ENGINE-013);
+///          multi-frame traps fail loud instead of guessing.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: false for multi-frame traps.
+/// CEP:ASSUMES: the trampoline registered its frame pointer.
+/// CEP:COST: one load.
+/// CEP:EVIDENCE: deopt tests.
+/// CEP:SECURITY: prevents silent mis-reconstruction.
+#[must_use]
+pub fn is_single_machine_frame(state: &TrapState) -> bool {
+    TRAMPOLINE.with(|t| {
+        let t = t.borrow();
+        if t.tramp_frame == 0 || state.rbp == 0 {
+            return false;
+        }
+        // CEP:UNSAFE: read of the saved rbp at the trap frame.
+        // CEP:WHAT: Chain termination check.
+        // CEP:WHY: See above.
+        // CEP:FAILURE: returns false on mismatch.
+        // CEP:ASSUMES: engine-generated frames only.
+        // CEP:COST: one load.
+        // CEP:EVIDENCE: deopt tests.
+        // CEP:SECURITY: reads engine frame memory only.
+        let saved = unsafe { (state.rbp as *const u64).read() } as usize;
+        saved == t.tramp_frame
+    })
 }
 
 /// Outcome of a guarded call into compiled code.
@@ -96,6 +131,8 @@ struct Trampoline {
     heap: Option<*mut Heap>,
     trap: Option<TrapState>,
     ret_word: u64,
+    code_base: usize,
+    tramp_frame: usize,
 }
 
 // SAFETY: raw pointers are engine-owned and used only on the owning thread.
@@ -118,11 +155,7 @@ unsafe impl Send for Trampoline {}
 ///
 /// # Errors
 /// DeoptFailed for inconsistent trampoline state.
-pub fn with_trampoline(
-    heap: &mut Heap,
-    code_base: usize,
-    entry: usize,
-) -> Result<TrampOutcome, EngineError> {
+pub fn with_trampoline(heap: &mut Heap, code_base: usize, entry: usize) -> Result<TrampOutcome, EngineError> {
     TRAMPOLINE.with(|t| {
         // CEP:UNSAFE: setjmp/longjmp control transfer into this frame.
         // CEP:WHAT: Guarded call window.
@@ -140,14 +173,20 @@ pub fn with_trampoline(
             t.heap = Some(heap as *mut Heap);
             t.trap = None;
             t.ret_word = 0;
+            t.code_base = code_base;
+        }
+        // Capture this frame's pointer for the single-machine-frame check.
+        let marker = 0u8;
+        let frame_ptr = &marker as *const u8 as usize;
+        {
+            t.borrow_mut().tramp_frame = frame_ptr;
         }
         let rc = unsafe { setjmp(&mut buf) };
         let outcome = if rc == 0 {
-            // Normal path: call the compiled entry (rax=value, rdx=status).
-            let f: extern "C" fn() = unsafe { std::mem::transmute(entry) };
-            f();
-            let t = t.borrow();
-            TrampOutcome::Returned(t.ret_word)
+            // Normal path: call the compiled entry; rax is the value word.
+            let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(entry) };
+            let word = f();
+            TrampOutcome::Returned(word)
         } else {
             let t = t.borrow();
             match t.trap {
@@ -160,7 +199,6 @@ pub fn with_trampoline(
             t.jmp = None;
             t.heap = None;
         }
-        let _ = code_base;
         Ok(outcome)
     })
 }
@@ -193,15 +231,30 @@ pub fn record_call_result(word: u64) {
 /// CEP:COST: cold; one longjmp per trap.
 /// CEP:EVIDENCE: tests/t0_exec.rs.
 /// CEP:SECURITY: frame pointers validated by the engine after landing.
-pub extern "C" fn jit_trap(kind: u64, rbp: usize, rsp: usize, code_base: usize) -> ! {
+pub extern "C" fn jit_trap(kind: u64, rbp: usize, rsp: usize) -> ! {
+    // The return address of the trap call sits at [rsp]; it identifies the
+    // exact trap site inside the compiled code (doc/deopt.md).
+    // CEP:UNSAFE: read of the trap call's return address.
+    // CEP:WHAT: Site identification.
+    // CEP:WHY: The engine maps the offset back to the deopt record.
+    // CEP:FAILURE: none; the call pushed the address.
+    // CEP:ASSUMES: called from an engine template call site.
+    // CEP:COST: one load.
+    // CEP:EVIDENCE: deopt tests.
+    // CEP:SECURITY: read of the engine's own stack only.
+    let ret = unsafe { (rsp as *const u64).read() } as usize;
     let state = TrapState {
         kind: if kind == 0 { TrapKind::DivideByZero } else { TrapKind::BoundsCheck },
         rbp,
         rsp,
-        code_base,
+        ret,
+        code_base: 0,
     };
+    let _ = state.code_base;
     TRAMPOLINE.with(|t| {
         let mut t = t.borrow_mut();
+        let mut state = state;
+        state.code_base = t.code_base;
         t.trap = Some(state);
         match t.jmp {
             Some(env) => {
@@ -232,8 +285,8 @@ pub extern "C" fn jit_trap(kind: u64, rbp: usize, rsp: usize, code_base: usize) 
 /// CEP:EVIDENCE: tests/t0_exec.rs.
 /// CEP:SECURITY: none beyond jit_trap.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_trap_div0(rbp: usize, rsp: usize, code_base: usize) -> ! {
-    jit_trap(0, rbp, rsp, code_base)
+pub extern "C" fn jit_trap_div0(rbp: usize, rsp: usize) -> ! {
+    jit_trap(0, rbp, rsp)
 }
 
 /// Bounds-check trap stub.
@@ -247,8 +300,8 @@ pub extern "C" fn jit_trap_div0(rbp: usize, rsp: usize, code_base: usize) -> ! {
 /// CEP:EVIDENCE: tests/t1_exec.rs.
 /// CEP:SECURITY: none beyond jit_trap.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_trap_bounds(rbp: usize, rsp: usize, code_base: usize) -> ! {
-    jit_trap(1, rbp, rsp, code_base)
+pub extern "C" fn jit_trap_bounds(rbp: usize, rsp: usize) -> ! {
+    jit_trap(1, rbp, rsp)
 }
 
 /// Checked fmod helper for the MODULO template.
@@ -340,6 +393,44 @@ pub extern "C" fn jit_store_elem(arr: u64, idx: f64, val: u64) -> u64 {
                 }
             }
             None => 1,
+        }
+    })
+}
+
+/// Element load helper for compiled code.
+///
+/// CEP:WHAT: Bounds-checked element load.
+/// CEP:WHY: T1+ element access goes through the runtime until register
+///          allocation lands (doc/codegen.md Known Limitations).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: rdx=1 on bounds failure (template traps), rax=word,
+///              rdx=0 on success.
+/// CEP:ASSUMES: System V ABI; heap registered.
+/// CEP:COST: Heap::load_word cost.
+/// CEP:EVIDENCE: tests/t1_exec.rs.
+/// CEP:SECURITY: index validated inside load_word.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_load_elem(arr: u64, idx: f64) -> (u64, u64) {
+    TRAMPOLINE.with(|t| {
+        let t = t.borrow();
+        match t.heap {
+            Some(h) => {
+                // CEP:UNSAFE: dereference of the registered heap pointer.
+                // CEP:WHAT: Checked load from machine code.
+                // CEP:WHY: Template element path.
+                // CEP:FAILURE: (0, 1) on bounds failure.
+                // CEP:ASSUMES: heap registered; arr engine-owned.
+                // CEP:COST: Heap::load_word cost.
+                // CEP:EVIDENCE: tests/t1_exec.rs.
+                // CEP:SECURITY: bounds checked inside load_word.
+                unsafe {
+                    match (*h).load_word(arr as usize, idx) {
+                        Ok(w) => (w, 0),
+                        Err(_) => (0, 1),
+                    }
+                }
+            }
+            None => (0, 1),
         }
     })
 }

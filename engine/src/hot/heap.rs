@@ -86,19 +86,6 @@ pub struct Heap {
     pub stats: GcStats,
 }
 
-/// A registered precise root span (interpreter frame buffers).
-#[derive(Debug, Clone, Copy)]
-pub struct RootSpan {
-    /// Address of the first word.
-    pub ptr: *const u64,
-    /// Number of words.
-    pub words: usize,
-}
-
-// SAFETY: non-owning view; the engine guarantees it outlives the
-// collection (doc/gc.md).
-unsafe impl Send for RootSpan {}
-
 unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;

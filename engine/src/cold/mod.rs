@@ -24,9 +24,15 @@ pub mod code_cache;
 pub mod tier0;
 /// Sea of Nodes IR: graph, builder, verifier (spec 3.1, standard 38.17).
 pub mod ir;
-// pub mod passes;  // added when implemented
-// pub mod codegen;  // added when implemented
-// pub mod deopt;  // added when implemented
-// pub mod gc;  // added when implemented
-// pub mod engine;  // added when implemented
-// pub mod pipeline;  // added when implemented
+/// Optimization passes (spec 3.2, 4, 5; standard 38.20).
+pub mod passes;
+/// Machine-code lowering from the IR.
+pub mod codegen;
+/// Deoptimization metadata and frame reconstruction (spec 5.7).
+pub mod deopt;
+/// GC driver: roots, young collections, concurrent old marking.
+pub mod gc;
+/// The tiering engine driver (spec 6.3).
+pub mod engine;
+/// The versioned pass pipeline descriptor (38.20).
+pub mod pipeline;
