@@ -359,9 +359,12 @@ impl Emitter {
     /// CEP:EVIDENCE: golden bytes.
     /// CEP:SECURITY: none
     pub fn mov_rr(&mut self, dst: u8, src: u8) {
+        // Opcode 89 (MOV r/m64, r64) copies the REG field into the RM
+        // field, so the ModRM reg field carries the SOURCE and rm the
+        // destination (Intel SDM Vol 2A, MOV-64 MR form).
         self.code.push(0x48 | ((dst >= 8) as u8) << 2 | ((src >= 8) as u8));
         self.code.push(0x89);
-        self.code.push(0xC0 | ((dst & 7) << 3) | (src & 7));
+        self.code.push(0xC0 | ((src & 7) << 3) | (dst & 7));
     }
 
     /// mov r64, [rsp+disp8].
@@ -1407,6 +1410,16 @@ mod tests {
                 0x49, 0xBA, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r10
             ]
         );
+    }
+
+    #[test]
+    fn golden_mov_rr_direction() {
+        let mut e = Emitter::new();
+        e.mov_rr(7, 0); // rdi = rax
+        assert_eq!(e.as_slice(), &[0x48, 0x89, 0xC7], "mov_rr(7,0) must be `mov rdi, rax`");
+        let mut e = Emitter::new();
+        e.mov_rr(0, 7); // rax = rdi
+        assert_eq!(e.as_slice(), &[0x48, 0x89, 0xF8], "mov_rr(0,7) must be `mov rax, rdi`");
     }
 
     #[test]

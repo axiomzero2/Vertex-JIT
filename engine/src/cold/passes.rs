@@ -275,12 +275,36 @@ fn kind_name(k: &NodeKind) -> &'static str {
 /// CEP:EVIDENCE: exercised by every pass test.
 /// CEP:SECURITY: none
 fn replace_all(g: &mut Graph, sites: &mut [(NodeId, DeoptSite)], from: NodeId, to: NodeId) {
+    // Control inputs (Region/If/Loop operands) are topology: replacing
+    // them with a data value breaks the pred-to-phi correspondence.
+    // Passes that rewrite control must do so with explicit block surgery.
+    let control_inputs: Vec<usize> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| {
+            n.inputs
+                .iter()
+                .filter(|inp| {
+                    **inp == from && g.nodes[inp.0 as usize].ty == VType::Control
+                })
+                .map(move |_| i)
+        })
+        .collect();
     for node in &mut g.nodes {
         for inp in &mut node.inputs {
             if *inp == from {
                 *inp = to;
             }
         }
+    }
+    for i in control_inputs {
+        let idx = g.nodes[i]
+            .inputs
+            .iter()
+            .position(|inp| *inp == to)
+            .expect("control input just rewritten");
+        g.nodes[i].inputs[idx] = from;
     }
     sites_replace(sites, from, to);
 }
@@ -349,28 +373,47 @@ fn node_key(g: &Graph, n: NodeId) -> String {
 /// # Errors
 /// Internal inconsistency.
 pub fn if_fold(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
-    let mut dead: Vec<NodeId> = Vec::new();
+    // Guards whose condition folds so the trap side is dead are removed.
+    // Control structure (Regions, projections, phi arity) is left intact:
+    // severing Region inputs breaks the pred-to-phi correspondence
+    // (standard 38.21 pass legality).
+    let mut dead_traps: Vec<NodeId> = Vec::new();
     for i in 0..g.nodes.len() {
-        let NodeKind::If = g.nodes[i].kind else { continue };
-        let cond = g.nodes[i].inputs[1];
+        let NodeKind::UncommonTrap { .. } = g.nodes[i].kind else { continue };
+        let Some(proj) = g.nodes[i].inputs.first().copied() else {
+            continue;
+        };
+        let (NodeKind::IfTrue | NodeKind::IfFalse) = g.nodes[proj.0 as usize].kind else {
+            continue;
+        };
+        let Some(ifn) = g.nodes[proj.0 as usize].inputs.first().copied() else {
+            continue;
+        };
+        let NodeKind::If = g.nodes[ifn.0 as usize].kind else { continue };
+        let Some(cond) = g.nodes[ifn.0 as usize].inputs.get(1).copied() else {
+            continue;
+        };
+        let is_true_side = g.nodes[proj.0 as usize].kind == NodeKind::IfTrue;
         match const_of(g, cond) {
-            Some(F::Bool(true)) => {
-                if let Some(ff) = proj_of(g, NodeId(i as u32), false) {
-                    dead.push(ff);
-                }
-            }
-            Some(F::Bool(false)) => {
-                if let Some(tt) = proj_of(g, NodeId(i as u32), true) {
-                    dead.push(tt);
-                }
-            }
+            // Trap on the true side and the condition is constant false:
+            // the trap cannot fire.
+            Some(F::Bool(false)) if is_true_side => dead_traps.push(NodeId(i as u32)),
+            // Trap on the false side and the condition is constant true:
+            // the trap cannot fire.
+            Some(F::Bool(true)) if !is_true_side => dead_traps.push(NodeId(i as u32)),
             _ => {}
         }
     }
-    for d in dead {
+    for t in dead_traps {
+        sites.retain(|(n, _)| *n != t);
         for node in &mut g.nodes {
-            node.inputs.retain(|inp| *inp != d);
+            node.inputs.retain(|inp| *inp != t);
         }
+        // Replace the node with an inert constant control marker: clearing
+        // its kind keeps ids stable.
+        g.nodes[t.0 as usize].kind = NodeKind::Null;
+        g.nodes[t.0 as usize].ty = VType::Unit;
+        g.nodes[t.0 as usize].inputs.clear();
     }
     dead_code_elimination(g, sites)
 }
@@ -474,7 +517,9 @@ pub fn dead_code_elimination(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>
             next += 1;
         }
     }
-    // Rewrite deopt sites through the same remap.
+    // Rewrite deopt sites through the same remap; drop sites whose trigger
+    // node was removed (they can never fire).
+    sites.retain(|(sn, _)| (sn.0 as usize) < n && remap[sn.0 as usize].0 != u32::MAX);
     for (sn, site) in sites.iter_mut() {
         if (sn.0 as usize) < n && remap[sn.0 as usize].0 != u32::MAX {
             *sn = remap[sn.0 as usize];
@@ -502,13 +547,22 @@ pub fn dead_code_elimination(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>
         new_nodes.push(nd);
     }
     g.nodes = new_nodes;
-    // Terminator and entry ids move with the compaction.
+    // Terminator, entry and block-head ids move with the compaction.
     g.start = remap[g.start.0 as usize];
     if let Some(r) = g.ret {
         g.ret = Some(remap[r.0 as usize]);
     }
     if let Some(h) = g.halt {
         g.halt = Some(remap[h.0 as usize]);
+    }
+    for b in &mut g.blocks {
+        if let Some(h) = b.head {
+            if remap[h.0 as usize].0 != u32::MAX {
+                b.head = Some(remap[h.0 as usize]);
+            } else {
+                b.head = None;
+            }
+        }
     }
     Ok(())
 }
@@ -637,14 +691,20 @@ pub fn licm(g: &mut Graph) -> Result<(), String> {
         for s in &g.blocks[bi].succs {
             let h = s.0 as usize;
             if dominates(&doms, h, bi) {
+                // Natural loop of the back-edge bi -> h: {h} plus all blocks
+                // reaching bi without passing through h. The header's own
+                // predecessors are never expanded (a self-loop's body is
+                // exactly the header).
                 let mut body = vec![h];
                 let mut stack = vec![bi];
                 while let Some(x) = stack.pop() {
-                    if !body.contains(&x) {
+                    if x != h && !body.contains(&x) {
                         body.push(x);
                         for p in &g.blocks[x].preds {
                             stack.push(p.0 as usize);
                         }
+                    } else if x == h && !body.contains(&x) {
+                        body.push(x);
                     }
                 }
                 loops.push((h, body));
@@ -715,7 +775,7 @@ pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), St
         'uses: for (j, node) in g.nodes.iter().enumerate() {
             match &node.kind {
                 NodeKind::LoadIdx => {
-                    if node.inputs[0] == arr {
+                    if node.inputs.first() == Some(&arr) {
                         match const_of(g, node.inputs[1]) {
                             Some(F::Num(ix))
                                 if ix >= 0.0 && ix.fract() == 0.0 && (ix as usize) < len =>
@@ -730,7 +790,7 @@ pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), St
                     }
                 }
                 NodeKind::StoreIdx => {
-                    if node.inputs[0] == arr {
+                    if node.inputs.first() == Some(&arr) {
                         match const_of(g, node.inputs[1]) {
                             Some(F::Num(ix))
                                 if ix >= 0.0 && ix.fract() == 0.0 && (ix as usize) < len =>
@@ -748,7 +808,7 @@ pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), St
                     }
                 }
                 NodeKind::ArrayLen => {
-                    if node.inputs[0] == arr {
+                    if node.inputs.first() == Some(&arr) {
                         accesses.push((j, usize::MAX, None));
                     }
                 }
@@ -762,6 +822,16 @@ pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), St
             }
         }
         if escapes {
+            continue;
+        }
+        // Deopt sites may reference the array (guard traps recorded the
+        // live locals). Materializing a replaced array at deopt is ticket
+        // CEP-ENGINE-009; until then PEA bails for such arrays.
+        let site_ref = sites.iter().any(|(_, site)| {
+            site.locals.iter().any(|(_, x, _)| *x == arr)
+                || site.stack.iter().any(|(x, _)| *x == arr)
+        });
+        if site_ref {
             continue;
         }
         let mut slots: Vec<Option<NodeId>> = vec![None; len];
@@ -814,6 +884,13 @@ pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), St
             for node in &mut g.nodes {
                 node.inputs.retain(|inp| *inp != d);
             }
+            // The removed array and accesses vanish from deopt sites too:
+            // the replaced program can no longer reach those traps.
+            sites.retain(|(n, site)| {
+                *n != d
+                    && site.stack.iter().all(|(x, _)| *x != d)
+                    && site.locals.iter().all(|(_, x, _)| *x != d)
+            });
         }
     }
     dead_code_elimination(g, sites)
@@ -932,6 +1009,9 @@ fn find_static_map_loops(g: &Graph, budgets: &PassBudgets) -> Result<Vec<LoopCan
     let mut out = Vec::new();
     for i in 0..g.nodes.len() {
         let NodeKind::StoreIdx = g.nodes[i].kind else { continue };
+        if g.nodes[i].inputs.len() < 3 {
+            continue;
+        }
         let store = NodeId(i as u32);
         let out_arr = g.nodes[i].inputs[0];
         let idx = g.nodes[i].inputs[1];

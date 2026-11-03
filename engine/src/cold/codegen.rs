@@ -155,12 +155,15 @@ pub fn lower(
                     .inputs
                     .iter()
                     .map(|i| i.0 as usize)
-                    .filter(|i| is_data(*i))
+                    .filter(|i| is_data(*i) && *i != nid)
                     .collect();
                 dep_ids.extend(site_inputs(nid));
-                let deps_ok = dep_ids.iter().all(|inp| {
-                    emitted[*inp] || g.nodes[*inp].block.0 as usize != bi
-                });
+                // Phis emit no code: their values arrive via the
+                // predecessor-exit copies, so they are always ready.
+                let deps_ok = matches!(g.nodes[nid].kind, NodeKind::Phi { .. })
+                    || dep_ids.iter().all(|inp| {
+                        emitted[*inp] || g.nodes[*inp].block.0 as usize != bi
+                    });
                 if deps_ok {
                     let rets = emit_node(
                         &mut e,
@@ -242,12 +245,13 @@ pub fn lower(
                     ));
                 };
                 let cond = g.nodes[ifn.0 as usize].inputs[1];
-                // Polarity: succ[0] is the taken side recorded by the
-                // builder; its head is the corresponding projection.
+                // Polarity: the builder records whether succs[0] is the
+                // condition-true side (taken_sides), which stays correct
+                // even when the taken edge targets a loop header whose
+                // head node is the Loop, not a projection.
                 let s0 = g.blocks[bi].succs[0].0 as usize;
                 let s1 = g.blocks[bi].succs[1].0 as usize;
-                let true_proj = proj_true(g, ifn);
-                let s0_is_true = g.blocks[s0].head == Some(true_proj);
+                let s0_is_true = g.taken_sides.get(bi).copied().flatten().unwrap_or(false);
                 // test cond; jz <false side>; jmp <true side>
                 load_slot_rax(&mut e, slot_of[cond.0 as usize]);
                 e.test_rr(0, 0);

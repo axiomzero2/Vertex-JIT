@@ -209,6 +209,10 @@ pub struct Graph {
     pub ret: Option<NodeId>,
     /// Halt node (None for Return-only graphs).
     pub halt: Option<NodeId>,
+    /// For each block with a conditional terminator: whether succs[0] is
+    /// the condition-true side. None for non-conditional blocks. Recorded
+    /// at lift time so codegen needs no head-node heuristics (doc/ir.md).
+    pub taken_sides: Vec<Option<bool>>,
     /// Local slot count.
     pub local_count: u16,
 }
@@ -471,6 +475,7 @@ pub fn lift(
         start: NodeId(0),
         ret: None,
         halt: None,
+        taken_sides: vec![None; block_count],
         local_count: func.locals.len() as u16,
     };
     for _ in 0..block_count {
@@ -782,6 +787,7 @@ pub fn lift(
                     let tb = block_of[t as usize].0 as usize;
                     let env_a = env.clone();
                     let env_b = env.clone();
+                    g.taken_sides[bi] = Some(insn.op == Opcode::JumpIfTrue);
                     if (t as usize) <= pc {
                         close_loop(&mut g, bi, tb, take, &env_a, &mut deopt_sites, t as usize, max_nodes)?;
                         if bi + 1 < block_count {

@@ -175,9 +175,20 @@ pub fn with_trampoline(heap: &mut Heap, code_base: usize, entry: usize) -> Resul
             t.ret_word = 0;
             t.code_base = code_base;
         }
-        // Capture this frame's pointer for the single-machine-frame check.
-        let marker = 0u8;
-        let frame_ptr = &marker as *const u8 as usize;
+        // Capture this frame's pointer for the single-machine-frame check:
+        // the compiled callee's prologue saves exactly this rbp value.
+        // CEP:UNSAFE: reads the current frame pointer register.
+        // CEP:WHAT: Frame-pointer capture.
+        // CEP:WHY: The trap-depth check compares the callee's saved rbp
+        //          against the trampoline's rbp.
+        // CEP:FAILURE: none; a register read.
+        // CEP:ASSUMES: frame pointers enabled (default; the crate never
+        //              disables them).
+        // CEP:COST: one register move.
+        // CEP:EVIDENCE: deopt tests.
+        // CEP:SECURITY: read-only register access.
+        let frame_ptr: usize;
+        unsafe { core::arch::asm!("mov {}, rbp", out(reg) frame_ptr, options(nomem)) };
         {
             t.borrow_mut().tramp_frame = frame_ptr;
         }
