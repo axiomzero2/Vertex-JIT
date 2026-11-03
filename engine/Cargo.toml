@@ -1,0 +1,19 @@
+[package]
+name = "vertex-jit"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Tiered JIT execution engine for Vertex bytecode (T0 copy-and-patch, T1 Sea of Nodes, T2 PEA/GVN/LICM, T3 PGO/unroll/vectorize)"
+
+[lib]
+name = "vertex_jit"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+debug = true
+panic = "abort"
+
+[lints.rust]
+missing_docs = "deny"
