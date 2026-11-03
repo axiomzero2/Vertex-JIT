@@ -1022,10 +1022,23 @@ impl TemplateLibrary {
             e.push_r(0);
             Template { code: e.as_slice().to_vec(), holes: vec![(2, Hole::Imm64)] }
         };
+        // Add/Mul are commutative: memory-operand form per spec 2.2.
         let sse_binop = |op: u8| {
             let mut e = Emitter::new();
             e.movsd_xmm_rsp(0, 0);
             e.emit(&[0xF2, 0x0F, op, 0x44, 0x24, 0x08]);
+            e.movsd_rsp_xmm(8, 0);
+            e.add_rsp(8);
+            Template { code: e.as_slice().to_vec(), holes: vec![] }
+        };
+        // Sub/Div are NOT commutative: load left into xmm0, right into
+        // xmm1, then op xmm0, xmm1 (left op right), matching the
+        // interpreter's operand order (doc/tier0.md).
+        let sse_binop_ordered = |op: u8| {
+            let mut e = Emitter::new();
+            e.movsd_xmm_rsp(0, 8); // left
+            e.movsd_xmm_rsp(1, 0); // right
+            e.f2_op(op, 0, 1);
             e.movsd_rsp_xmm(8, 0);
             e.add_rsp(8);
             Template { code: e.as_slice().to_vec(), holes: vec![] }
@@ -1048,14 +1061,12 @@ impl TemplateLibrary {
             let nan_or_zero = e.label();
             let ok = e.label();
             let done = e.label();
+            let end = e.label();
             e.movsd_xmm_rsp(1, 0);
             e.xorps(3, 3);
             e.ucomisd(1, 3);
             e.jcc(Cc::P, nan_or_zero);
             e.jcc(Cc::Eq, trap);
-            e.bind(trap);
-            e.call_abs(trap_addr);
-            e.ud2();
             e.bind(nan_or_zero);
             e.movsd_xmm_rsp(0, 8);
             e.f2_op(0x5E, 0, 1);
@@ -1069,6 +1080,13 @@ impl TemplateLibrary {
             e.movsd_rsp_xmm(8, 0);
             e.bind(done);
             e.add_rsp(8);
+            e.jmp(end);
+            e.bind(trap);
+            e.emit(&[0x48, 0x89, 0xEF]); // mov rdi, rbp
+            e.emit(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+            e.call_abs(trap_addr);
+            e.ud2();
+            e.bind(end);
             e.finalize().expect("template labels are statically bound");
             Template { code: e.as_slice().to_vec(), holes: vec![] }
         };
@@ -1101,9 +1119,9 @@ impl TemplateLibrary {
         };
         let store_var = {
             let mut e = Emitter::new();
-            e.pop_r(0);
-            e.mov_rbp_r(0, 0);
-            Template { code: e.as_slice().to_vec(), holes: vec![(2, Hole::Disp8Slot)] }
+            e.pop_r(0);            // 1 byte
+            e.mov_rbp_r(0, 0);     // 48 89 45 d8: disp is the 4th byte
+            Template { code: e.as_slice().to_vec(), holes: vec![(4, Hole::Disp8Slot)] }
         };
         let jump = {
             let mut e = Emitter::new();
@@ -1127,13 +1145,10 @@ impl TemplateLibrary {
             e.jcc(Cc::Ne, hole);
             Template { code: e.as_slice().to_vec(), holes: vec![(6, Hole::Rel32)] }
         };
-        let halt_tail = {
-            let mut e = Emitter::new();
-            e.emit(&[0x31, 0xC0]);
-            e.emit(&[0x31, 0xD2]);
-            e.epilogue();
-            e.as_slice().to_vec()
-        };
+        // The default halt tail discards the result; compile() rebuilds a
+        // depth-aware tail per program (the interpreter's Halt returns the
+        // bottom of the value stack).
+        let halt_tail = Vec::new();
         let ok_tail = {
             let mut e = Emitter::new();
             e.pop_r(0);
@@ -1145,7 +1160,7 @@ impl TemplateLibrary {
             push_number: imm64_template(0),
             push_bool: imm64_template(0),
             add: sse_binop(0x58),
-            sub: sse_binop(0x5C),
+            sub: sse_binop_ordered(0x5C),
             mul: sse_binop(0x59),
             div,
             modulo,
@@ -1209,6 +1224,8 @@ pub struct T0Code {
     pub offsets: Vec<u32>,
     /// Static maximum value-stack depth.
     pub max_stack: u32,
+    /// Static type of the value returned at Halt.
+    pub return_tag: crate::hot::value::TypeTag,
 }
 
 /// Compile a function with copy-and-patch (spec 2).
@@ -1246,15 +1263,22 @@ pub fn compile(
         off += t.code.len() as u32;
     }
     offsets.push(off);
-    // Pass 2: copy templates and patch holes.
-    let mut bytes = Vec::with_capacity(off as usize + lib.halt_tail.len());
-    bytes.resize(off as usize, 0);
+    // Pass 2: prologue (frame setup) then copy templates and patch holes.
+    // Locals live at [rbp - 8*(slot+1)]; the frame reserves locals*8 bytes.
+    let mut pro = Emitter::new();
+    pro.prologue();
+    pro.sub_rsp((func.locals.len() as u32) * 8);
+    let prefix = pro.as_slice().to_vec();
+    let mut bytes = Vec::with_capacity(prefix.len() + off as usize + lib.halt_tail.len());
+    bytes.extend_from_slice(&prefix);
+    bytes.resize(prefix.len() + off as usize, 0);
+    let prefix_len = prefix.len();
     for (pc, insn) in func.code.iter().enumerate() {
         if insn.op == Opcode::Halt {
             continue;
         }
         let t = lib.template(insn.op).ok_or(IllegalForT0::Opcode(insn.op))?;
-        let base = offsets[pc] as usize;
+        let base = prefix_len + offsets[pc] as usize;
         bytes[base..base + t.code.len()].copy_from_slice(&t.code);
         for &(hole_off, kind) in &t.holes {
             let at = base + hole_off as usize;
@@ -1281,7 +1305,10 @@ pub fn compile(
                         .get(tgt as usize)
                         .copied()
                         .ok_or(IllegalForT0::TypeMismatch("Rel32 target out of range"))?;
-                    let rel = tgt_off as i64 - (base as i64 + t.code.len() as i64);
+                    // Both ends are in TEMPLATE coordinates (the prefix is
+                    // position-independent for relative displacements).
+                    let base_t = offsets[pc] as i64;
+                    let rel = tgt_off as i64 - (base_t + t.code.len() as i64);
                     bytes[at..at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
                 }
                 Hole::Disp8Slot => {
@@ -1296,8 +1323,66 @@ pub fn compile(
             }
         }
     }
-    bytes.extend_from_slice(&lib.halt_tail);
-    Ok(T0Code { bytes, offsets, max_stack: report.max_stack })
+    // Depth-aware halt tail: the interpreter's Halt returns the bottom of
+    // the value stack (legacy parity). The static depth and lattice type
+    // at the Halt pc come from a linear simulation.
+    let mut depth: i32 = 0;
+    let mut depth_at_halt: i32 = 0;
+    let mut stack_lats: Vec<Lat> = Vec::new();
+    let mut return_lat = Lat::Num;
+    for insn in &func.code {
+        match insn.op {
+            Opcode::PushNumber | Opcode::PushBool | Opcode::LoadVar => {
+                depth += 1;
+                stack_lats.push(Lat::Num);
+            }
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Modulo => {
+                depth -= 1;
+                let _ = stack_lats.pop();
+                let _ = stack_lats.pop();
+                stack_lats.push(Lat::Num);
+            }
+            Opcode::GreaterThan | Opcode::LessThan | Opcode::Equal => {
+                depth -= 1;
+                let _ = stack_lats.pop();
+                let _ = stack_lats.pop();
+                stack_lats.push(Lat::Bool);
+            }
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::StoreVar | Opcode::AssignVar
+            | Opcode::Drop => {
+                depth -= 1;
+                let _ = stack_lats.pop();
+            }
+            Opcode::Halt => {
+                depth_at_halt = depth;
+                return_lat = stack_lats.first().copied().unwrap_or(Lat::Num);
+            }
+            _ => {}
+        }
+    }
+    {
+        let mut tail = Emitter::new();
+        if depth_at_halt > 0 {
+            // mov rax, [rsp + 8*(depth-1)] (bottom of the machine stack)
+            let disp = 8 * (depth_at_halt - 1);
+            tail.emit(&[0x48, 0x8B, 0x44, 0x24]);
+            tail.emit1(disp as u8);
+        } else {
+            tail.emit(&[0x31, 0xC0]);
+        }
+        tail.emit(&[0x31, 0xD2]);
+        tail.epilogue();
+        bytes.extend_from_slice(&tail.as_slice());
+    }
+    Ok(T0Code {
+        bytes,
+        offsets,
+        max_stack: report.max_stack,
+        return_tag: match return_lat {
+            Lat::Num => crate::hot::value::TypeTag::Number,
+            Lat::Bool => crate::hot::value::TypeTag::Bool,
+        },
+    })
 }
 
 #[cfg(test)]

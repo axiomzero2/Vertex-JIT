@@ -527,20 +527,49 @@ pub fn lift(
                 }
                 g.alloc(NodeKind::Region, inputs, BlockId(bi as u32), VType::Control)
             };
-            // Local phis where reaching definitions differ (pruned SSA).
+            // Phis. For loop headers: a placeholder phi for every live
+            // slot (the back-edge value arrives later via close_loop, which
+            // patches inputs[1]); phi-simplify collapses the trivial ones.
+            // For ordinary merges: pruned phis only where reaching
+            // definitions differ.
+            let mut loop_slots: Vec<(u16, VType)> = Vec::new();
+            if loop_header[bi] {
+                for s in 0..env.len() {
+                    if env[s].0 != u32::MAX {
+                        let ty = g.nodes[env[s].0 as usize].ty;
+                        loop_slots.push((s as u16, ty));
+                    }
+                }
+            }
             for s in 0..env.len() {
-                let mut vals = Vec::with_capacity(extra_edges.len() + 1);
+                let mut vals = Vec::with_capacity(extra_edges.len() + 2);
                 vals.push(env[s]);
                 for e in &extra_edges {
                     vals.push(e.env[s]);
                 }
-                if vals.iter().any(|v| *v != vals[0]) {
+                let is_loop_live = loop_header[bi] && env[s].0 != u32::MAX;
+                // Loop phis carry a placeholder second input (the
+                // back-edge); close_loop patches it.
+                if is_loop_live {
+                    vals.push(env[s]);
+                }
+                let differs = vals.iter().any(|v| *v != vals[0]);
+                if is_loop_live || (!loop_header[bi] && differs) {
                     budget_check!();
+                    let ty = if is_loop_live {
+                        loop_slots
+                            .iter()
+                            .find(|(sl, _)| *sl as usize == s)
+                            .map(|(_, t)| *t)
+                            .unwrap_or(VType::Num)
+                    } else {
+                        VType::Num
+                    };
                     let p = g.alloc(
                         NodeKind::Phi { slot: s as u16 },
                         vals,
                         BlockId(bi as u32),
-                        VType::Num,
+                        ty,
                     );
                     env[s] = p;
                 }
@@ -828,6 +857,10 @@ pub fn lift(
                     budget_check!();
                     let h = g.alloc(NodeKind::Halt, vec![ctrl], BlockId(bi as u32), VType::Control);
                     g.halt = Some(h);
+                    // Record the halt's stack shape: the interpreter's Halt
+                    // returns the bottom of the value stack (legacy parity),
+                    // so codegen needs the bottom node and its type.
+                    record_site(&g, &mut deopt_sites, h, pc as u32, &stack, &env);
                     stack.clear();
                     ctrl = NodeId(u32::MAX);
                 }

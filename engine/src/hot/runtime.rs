@@ -232,17 +232,18 @@ pub fn record_call_result(word: u64) {
 /// CEP:EVIDENCE: tests/t0_exec.rs.
 /// CEP:SECURITY: frame pointers validated by the engine after landing.
 pub extern "C" fn jit_trap(kind: u64, rbp: usize, rsp: usize) -> ! {
-    // The return address of the trap call sits at [rsp]; it identifies the
-    // exact trap site inside the compiled code (doc/deopt.md).
+    // The return address of the trap call sits at [rsp - 8]: the rsi
+    // operand was captured BEFORE the call pushed the return address, so it
+    // still points at the compiled value-stack top (doc/deopt.md).
     // CEP:UNSAFE: read of the trap call's return address.
     // CEP:WHAT: Site identification.
     // CEP:WHY: The engine maps the offset back to the deopt record.
-    // CEP:FAILURE: none; the call pushed the address.
+    // CEP:FAILURE: none; the call pushed the address below rsp.
     // CEP:ASSUMES: called from an engine template call site.
     // CEP:COST: one load.
     // CEP:EVIDENCE: deopt tests.
     // CEP:SECURITY: read of the engine's own stack only.
-    let ret = unsafe { (rsp as *const u64).read() } as usize;
+    let ret = unsafe { ((rsp - 8) as *const u64).read() } as usize;
     let state = TrapState {
         kind: if kind == 0 { TrapKind::DivideByZero } else { TrapKind::BoundsCheck },
         rbp,
@@ -252,11 +253,17 @@ pub extern "C" fn jit_trap(kind: u64, rbp: usize, rsp: usize) -> ! {
     };
     let _ = state.code_base;
     TRAMPOLINE.with(|t| {
-        let mut t = t.borrow_mut();
-        let mut state = state;
-        state.code_base = t.code_base;
-        t.trap = Some(state);
-        match t.jmp {
+        // Record the state and release the borrow BEFORE the longjmp: the
+        // guard would otherwise survive the jump (its drop never runs) and
+        // the landing code's borrow() would panic.
+        let env = {
+            let mut t = t.borrow_mut();
+            let mut state = state;
+            state.code_base = t.code_base;
+            t.trap = Some(state);
+            t.jmp
+        };
+        match env {
             Some(env) => {
                 // CEP:UNSAFE: longjmp control transfer.
                 // CEP:WHAT: Trap exit to trampoline.

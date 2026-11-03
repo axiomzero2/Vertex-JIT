@@ -26,7 +26,8 @@
 //               fire (proved constants); see the pea and vectorize
 //               contracts.
 
-use crate::cold::ir::{verify, Graph, NodeId, NodeKind, VType};
+use crate::cold::ir::{self, DeoptSite, Graph, NodeId, NodeKind, VType};
+use crate::hot::value::TypeTag;
 use std::collections::BTreeMap;
 
 /// Pass name constants: the canonical pipeline (standard 38.20).
@@ -121,21 +122,54 @@ impl Default for PassBudgets {
 ///
 /// # Errors
 /// Error string on pass failure or unknown name.
-pub fn run_pass(name: &str, g: &mut Graph, budgets: &PassBudgets) -> Result<(), String> {
+pub fn run_pass(
+    name: &str,
+    g: &mut Graph,
+    sites: &mut Vec<(NodeId, DeoptSite)>,
+    budgets: &PassBudgets,
+) -> Result<(), String> {
     match name {
-        "const-fold" => const_fold(g),
-        "local-vn" => local_value_numbering(g),
-        "if-fold" => if_fold(g),
-        "phi-simp" => phi_simplify(g),
-        "dce" => dead_code_elimination(g),
-        "gvn" => global_value_numbering(g),
+        "const-fold" => const_fold(g, sites),
+        "local-vn" => local_value_numbering(g, sites),
+        "if-fold" => if_fold(g, sites),
+        "phi-simp" => phi_simplify(g, sites),
+        "dce" => dead_code_elimination(g, sites),
+        "gvn" => global_value_numbering(g, sites),
         "licm" => licm(g),
-        "pea" => pea(g),
-        "unroll" => unroll(g, budgets),
-        "vectorize" => vectorize(g, budgets),
+        "pea" => pea(g, sites),
+        "unroll" => unroll(g, sites, budgets),
+        "vectorize" => vectorize(g, sites, budgets),
         "inline" => Ok(()), // driven by the engine at lift time; see engine.rs
-        "verify" => verify(g),
+        "verify" => ir::verify(g),
         _ => Err(format!("unknown pass: {name}")),
+    }
+}
+
+/// Follow replacements in deopt sites.
+///
+/// CEP:WHAT: Site replacement rewrite.
+/// CEP:WHY: Sites must reference live nodes after every pass.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: none
+/// CEP:COST: O(sites * stack).
+/// CEP:EVIDENCE: differential tests (deopt after optimization).
+/// CEP:SECURITY: none
+fn sites_replace(sites: &mut [(NodeId, DeoptSite)], from: NodeId, to: NodeId) {
+    for (n, s) in sites.iter_mut() {
+        if *n == from {
+            *n = to;
+        }
+        for e in s.stack.iter_mut() {
+            if e.0 == from {
+                e.0 = to;
+            }
+        }
+        for l in s.locals.iter_mut() {
+            if l.1 == from {
+                l.1 = to;
+            }
+        }
     }
 }
 
@@ -155,7 +189,7 @@ pub fn run_pass(name: &str, g: &mut Graph, budgets: &PassBudgets) -> Result<(), 
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn const_fold(g: &mut Graph) -> Result<(), String> {
+pub fn const_fold(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     for i in 0..g.nodes.len() {
         let kind = kind_name(&g.nodes[i].kind);
         if kind == "?" {
@@ -192,10 +226,10 @@ pub fn const_fold(g: &mut Graph) -> Result<(), String> {
                     VType::Bool,
                 ),
             };
-            replace_all(g, NodeId(i as u32), repl);
+            replace_all(g, sites, NodeId(i as u32), repl);
         }
     }
-    dead_code_elimination(g)
+    dead_code_elimination(g, sites)
 }
 
 /// Value space of foldable constants.
@@ -240,7 +274,7 @@ fn kind_name(k: &NodeKind) -> &'static str {
 /// CEP:COST: O(n + e).
 /// CEP:EVIDENCE: exercised by every pass test.
 /// CEP:SECURITY: none
-fn replace_all(g: &mut Graph, from: NodeId, to: NodeId) {
+fn replace_all(g: &mut Graph, sites: &mut [(NodeId, DeoptSite)], from: NodeId, to: NodeId) {
     for node in &mut g.nodes {
         for inp in &mut node.inputs {
             if *inp == from {
@@ -248,6 +282,7 @@ fn replace_all(g: &mut Graph, from: NodeId, to: NodeId) {
             }
         }
     }
+    sites_replace(sites, from, to);
 }
 
 /// Local value numbering within blocks.
@@ -259,7 +294,7 @@ fn replace_all(g: &mut Graph, from: NodeId, to: NodeId) {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn local_value_numbering(g: &mut Graph) -> Result<(), String> {
+pub fn local_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     let mut table: BTreeMap<String, NodeId> = BTreeMap::new();
     for i in 0..g.nodes.len() {
         let node = &g.nodes[i];
@@ -269,12 +304,12 @@ pub fn local_value_numbering(g: &mut Graph) -> Result<(), String> {
         let key = node_key(g, NodeId(i as u32));
         if let Some(existing) = table.get(&key) {
             let repl = *existing;
-            replace_all(g, NodeId(i as u32), repl);
+            replace_all(g, sites, NodeId(i as u32), repl);
         } else {
             table.insert(key, NodeId(i as u32));
         }
     }
-    dead_code_elimination(g)
+    dead_code_elimination(g, sites)
 }
 
 /// Canonical key for a pure node: kind plus input ids (stable within a
@@ -284,11 +319,20 @@ fn node_key(g: &Graph, n: NodeId) -> String {
     let mut s = String::new();
     s.push_str(kind_name(&node.kind));
     s.push('(');
-    for (i, inp) in node.inputs.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
+    // Constants are distinguished by their payload, not just their kind:
+    // two ConstNum nodes are equal only when their values match.
+    match &node.kind {
+        NodeKind::ConstNum(f) => s.push_str(&format!("{}:{f:?}", "")),
+        NodeKind::ConstBool(b) => s.push_str(&format!("{b}")),
+        NodeKind::ConstStr(c) => s.push_str(&format!("{c}")),
+        _ => {
+            for (i, inp) in node.inputs.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&inp.0.to_string());
+            }
         }
-        s.push_str(&inp.0.to_string());
     }
     s.push(')');
     s
@@ -304,7 +348,7 @@ fn node_key(g: &Graph, n: NodeId) -> String {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn if_fold(g: &mut Graph) -> Result<(), String> {
+pub fn if_fold(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     let mut dead: Vec<NodeId> = Vec::new();
     for i in 0..g.nodes.len() {
         let NodeKind::If = g.nodes[i].kind else { continue };
@@ -328,7 +372,7 @@ pub fn if_fold(g: &mut Graph) -> Result<(), String> {
             node.inputs.retain(|inp| *inp != d);
         }
     }
-    dead_code_elimination(g)
+    dead_code_elimination(g, sites)
 }
 
 /// Find the IfTrue/IfFalse projection of an If.
@@ -351,16 +395,16 @@ fn proj_of(g: &Graph, ifn: NodeId, truthy: bool) -> Option<NodeId> {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn phi_simplify(g: &mut Graph) -> Result<(), String> {
+pub fn phi_simplify(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     for i in 0..g.nodes.len() {
         let NodeKind::Phi { .. } = g.nodes[i].kind else { continue };
         let inputs = g.nodes[i].inputs.clone();
         if !inputs.is_empty() && inputs.iter().all(|v| *v == inputs[0]) {
             let repl = inputs[0];
-            replace_all(g, NodeId(i as u32), repl);
+            replace_all(g, sites, NodeId(i as u32), repl);
         }
     }
-    dead_code_elimination(g)
+    dead_code_elimination(g, sites)
 }
 
 /// Dead code elimination: drop pure nodes with no uses.
@@ -373,8 +417,26 @@ pub fn phi_simplify(g: &mut Graph) -> Result<(), String> {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn dead_code_elimination(g: &mut Graph) -> Result<(), String> {
+pub fn dead_code_elimination(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     let n = g.nodes.len();
+    // Deopt sites anchor their referenced nodes: reconstruction reads the
+    // recorded slots, so those values must survive.
+    let mut anchored = vec![false; n];
+    for (sn, s) in sites.iter() {
+        if (sn.0 as usize) < n {
+            anchored[sn.0 as usize] = true;
+        }
+        for (sn, _) in &s.stack {
+            if (sn.0 as usize) < n {
+                anchored[sn.0 as usize] = true;
+            }
+        }
+        for (_, ln, _) in &s.locals {
+            if (ln.0 as usize) < n {
+                anchored[ln.0 as usize] = true;
+            }
+        }
+    }
     let mut uses = vec![0u32; n];
     for node in &g.nodes {
         for inp in &node.inputs {
@@ -389,7 +451,7 @@ pub fn dead_code_elimination(g: &mut Graph) -> Result<(), String> {
             if alive[i] {
                 continue;
             }
-            if !Graph::is_pure(&node.kind) || uses[i] > 0 {
+            if !Graph::is_pure(&node.kind) || uses[i] > 0 || anchored[i] {
                 alive[i] = true;
             }
         }
@@ -412,6 +474,22 @@ pub fn dead_code_elimination(g: &mut Graph) -> Result<(), String> {
             next += 1;
         }
     }
+    // Rewrite deopt sites through the same remap.
+    for (sn, site) in sites.iter_mut() {
+        if (sn.0 as usize) < n && remap[sn.0 as usize].0 != u32::MAX {
+            *sn = remap[sn.0 as usize];
+        }
+        for e in site.stack.iter_mut() {
+            if (e.0 .0 as usize) < n && remap[e.0 .0 as usize].0 != u32::MAX {
+                e.0 = remap[e.0 .0 as usize];
+            }
+        }
+        for l in site.locals.iter_mut() {
+            if (l.1 .0 as usize) < n && remap[l.1 .0 as usize].0 != u32::MAX {
+                l.1 = remap[l.1 .0 as usize];
+            }
+        }
+    }
     let mut new_nodes = Vec::with_capacity(next as usize);
     for (i, node) in g.nodes.iter().enumerate() {
         if !alive[i] {
@@ -424,6 +502,14 @@ pub fn dead_code_elimination(g: &mut Graph) -> Result<(), String> {
         new_nodes.push(nd);
     }
     g.nodes = new_nodes;
+    // Terminator and entry ids move with the compaction.
+    g.start = remap[g.start.0 as usize];
+    if let Some(r) = g.ret {
+        g.ret = Some(remap[r.0 as usize]);
+    }
+    if let Some(h) = g.halt {
+        g.halt = Some(remap[h.0 as usize]);
+    }
     Ok(())
 }
 
@@ -508,7 +594,7 @@ fn dominates(doms: &[usize], a: usize, b: usize) -> bool {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn global_value_numbering(g: &mut Graph) -> Result<(), String> {
+pub fn global_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     let doms = idoms(g);
     let mut table: BTreeMap<String, NodeId> = BTreeMap::new();
     for i in 0..g.nodes.len() {
@@ -522,13 +608,13 @@ pub fn global_value_numbering(g: &mut Graph) -> Result<(), String> {
             let eb = g.nodes[existing.0 as usize].block.0 as usize;
             if dominates(&doms, eb, b) {
                 let repl = *existing;
-                replace_all(g, NodeId(i as u32), repl);
+                replace_all(g, sites, NodeId(i as u32), repl);
                 continue;
             }
         }
         table.insert(key, NodeId(i as u32));
     }
-    dead_code_elimination(g)
+    dead_code_elimination(g, sites)
 }
 
 /// Loop-invariant code motion.
@@ -610,7 +696,7 @@ pub fn licm(g: &mut Graph) -> Result<(), String> {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn pea(g: &mut Graph) -> Result<(), String> {
+pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
     for i in 0..g.nodes.len() {
         let NodeKind::NewArray = g.nodes[i].kind else { continue };
         let arr = NodeId(i as u32);
@@ -701,7 +787,7 @@ pub fn pea(g: &mut Graph) -> Result<(), String> {
             match &g.nodes[j].kind {
                 NodeKind::LoadIdx => {
                     if let Some(v) = slots[ix] {
-                        replace_all(g, jn, v);
+                        replace_all(g, sites, jn, v);
                         dead.push(jn);
                     } else {
                         dead.clear();
@@ -718,7 +804,7 @@ pub fn pea(g: &mut Graph) -> Result<(), String> {
                         g.nodes[j].block,
                         VType::Num,
                     );
-                    replace_all(g, jn, repl);
+                    replace_all(g, sites, jn, repl);
                     dead.push(jn);
                 }
                 _ => {}
@@ -730,7 +816,7 @@ pub fn pea(g: &mut Graph) -> Result<(), String> {
             }
         }
     }
-    dead_code_elimination(g)
+    dead_code_elimination(g, sites)
 }
 
 // ---------------------------------------------------------------- T3 passes
@@ -748,7 +834,7 @@ pub fn pea(g: &mut Graph) -> Result<(), String> {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn unroll(g: &mut Graph, budgets: &PassBudgets) -> Result<(), String> {
+pub fn unroll(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>, budgets: &PassBudgets) -> Result<(), String> {
     // Handled together with vectorization: vectorize() performs the full
     // static-trip expansion (vector plus scalar remainder); plain unrolling
     // without vectorization is the same expansion with scalar nodes only.
@@ -757,7 +843,7 @@ pub fn unroll(g: &mut Graph, budgets: &PassBudgets) -> Result<(), String> {
     let candidates = find_static_map_loops(g, budgets)?;
     for c in candidates {
         if !c.vector_eligible {
-            expand_loop_scalar(g, &c, budgets)?;
+            expand_loop_scalar(g, sites, &c, budgets)?;
         }
     }
     Ok(())
@@ -787,7 +873,7 @@ pub fn unroll(g: &mut Graph, budgets: &PassBudgets) -> Result<(), String> {
 ///
 /// # Errors
 /// Internal inconsistency.
-pub fn vectorize(g: &mut Graph, budgets: &PassBudgets) -> Result<(), String> {
+pub fn vectorize(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>, budgets: &PassBudgets) -> Result<(), String> {
     if budgets.vector_width == 0 {
         return Ok(());
     }
@@ -800,7 +886,7 @@ pub fn vectorize(g: &mut Graph, budgets: &PassBudgets) -> Result<(), String> {
     let candidates = find_static_map_loops(g, budgets)?;
     for c in candidates {
         if c.vector_eligible {
-            expand_loop_vector(g, &c, budgets)?;
+            expand_loop_vector(g, sites, &c, budgets)?;
         }
     }
     Ok(())
@@ -959,7 +1045,7 @@ fn find_static_map_loops(g: &Graph, budgets: &PassBudgets) -> Result<Vec<LoopCan
 /// CEP:COST: O(trip).
 /// CEP:EVIDENCE: differential unroll tests.
 /// CEP:SECURITY: guards removed only with proven static bounds.
-fn expand_loop_scalar(g: &mut Graph, c: &LoopCandidate, _budgets: &PassBudgets) -> Result<(), String> {
+fn expand_loop_scalar(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>, c: &LoopCandidate, _budgets: &PassBudgets) -> Result<(), String> {
     let mut last_store: Option<NodeId> = None;
     let mut i = c.start;
     while i < c.bound {
@@ -1001,12 +1087,12 @@ fn expand_loop_scalar(g: &mut Graph, c: &LoopCandidate, _budgets: &PassBudgets) 
     // Replace the loop's store with the last expanded store; loop control
     // nodes die through DCE once the phi loses its users.
     if let Some(st) = last_store {
-        replace_all(g, c.store, st);
+        replace_all(g, sites, c.store, st);
     }
     // Rewire phi users to the init constant (the loop no longer iterates).
     let init = g.nodes[c.phi.0 as usize].inputs[0];
-    replace_all(g, c.phi, init);
-    dead_code_elimination(g)
+    replace_all(g, sites, c.phi, init);
+    dead_code_elimination(g, sites)
 }
 
 /// Expand a vectorizable loop into vector node kinds (full expansion).
@@ -1022,7 +1108,7 @@ fn expand_loop_scalar(g: &mut Graph, c: &LoopCandidate, _budgets: &PassBudgets) 
 /// CEP:COST: O(trip/width) vector nodes plus O(trip%width) scalar nodes.
 /// CEP:EVIDENCE: tests/vectorize_tests.rs.
 /// CEP:SECURITY: bounds proven by the static length check.
-fn expand_loop_vector(g: &mut Graph, c: &LoopCandidate, budgets: &PassBudgets) -> Result<(), String> {
+fn expand_loop_vector(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>, c: &LoopCandidate, budgets: &PassBudgets) -> Result<(), String> {
     let w = budgets.vector_width;
     let trip = c.bound - c.start;
     let vec_trip = (trip as u64) / u64::from(w);
@@ -1076,11 +1162,11 @@ fn expand_loop_vector(g: &mut Graph, c: &LoopCandidate, budgets: &PassBudgets) -
         i += 1.0;
     }
     if let Some(st) = last_store {
-        replace_all(g, c.store, st);
+        replace_all(g, sites, c.store, st);
     }
     let init = g.nodes[c.phi.0 as usize].inputs[0];
-    replace_all(g, c.phi, init);
-    dead_code_elimination(g)
+    replace_all(g, sites, c.phi, init);
+    dead_code_elimination(g, sites)
 }
 
 /// Static length of an array allocation node.

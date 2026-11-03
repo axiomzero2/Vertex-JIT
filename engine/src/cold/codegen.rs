@@ -47,6 +47,8 @@ pub struct CompiledCode {
     pub deopt: Vec<DeoptRecord>,
     /// Total frame slots (8 bytes each).
     pub slots: u32,
+    /// Static type of the returned word (Halt bottom / Ret value).
+    pub return_tag: TypeTag,
 }
 
 /// One deopt record (doc/deopt.md Formal Definitions).
@@ -118,23 +120,84 @@ pub fn lower(
 
     for bi in 0..g.blocks.len() {
         e.bind(block_labels[bi]);
-        for nid in 0..g.nodes.len() {
-            let node = &g.nodes[nid];
-            if node.block.0 as usize != bi {
-                continue;
+        // Schedule the block's nodes in dependency order: a node emits only
+        // after all its data inputs (plus, for Halt, the recorded halt-site
+        // stack nodes) have emitted. Node ids are creation order, which is
+        // not execution order after pass rewrites (standard 38.34).
+        let block_nodes: Vec<usize> = (0..g.nodes.len())
+            .filter(|nid| g.nodes[*nid].block.0 as usize == bi)
+            .collect();
+        let site_inputs = |nid: usize| -> Vec<usize> {
+            if matches!(g.nodes[nid].kind, NodeKind::Halt) {
+                deopt_sites
+                    .iter()
+                    .find(|(n, _)| n.0 as usize == nid)
+                    .map(|(_, s)| s.stack.iter().map(|(n, _)| n.0 as usize).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
             }
-            let rets = emit_node(
-                &mut e,
-                g,
-                NodeId(nid as u32),
-                &slot_of,
-                avx2,
-                helper,
-                callee_addrs,
-                bi,
-            )?;
-            if !rets.is_empty() {
-                node_trap_rets.insert(NodeId(nid as u32), rets);
+        };
+        let mut emitted = vec![false; g.nodes.len()];
+        let mut remaining = block_nodes.len();
+        while remaining > 0 {
+            let mut progressed = false;
+            for &nid in &block_nodes {
+                if emitted[nid] {
+                    continue;
+                }
+                // Only DATA dependencies gate emission: control nodes emit
+                // no code, and their edges form the control cycle
+                // (Loop <- IfTrue <- If <- Loop) that must not stall
+                // scheduling.
+                let is_data = |i: usize| g.nodes[i].ty != VType::Control;
+                let mut dep_ids: Vec<usize> = g.nodes[nid]
+                    .inputs
+                    .iter()
+                    .map(|i| i.0 as usize)
+                    .filter(|i| is_data(*i))
+                    .collect();
+                dep_ids.extend(site_inputs(nid));
+                let deps_ok = dep_ids.iter().all(|inp| {
+                    emitted[*inp] || g.nodes[*inp].block.0 as usize != bi
+                });
+                if deps_ok {
+                    let rets = emit_node(
+                        &mut e,
+                        g,
+                        NodeId(nid as u32),
+                        &slot_of,
+                        avx2,
+                        helper,
+                        callee_addrs,
+                        bi,
+                        deopt_sites,
+                    )?;
+                    if !rets.is_empty() {
+                        node_trap_rets.insert(NodeId(nid as u32), rets);
+                    }
+                    emitted[nid] = true;
+                    remaining -= 1;
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                // Cycles are impossible in a verified DAG; fail loud with
+                // the stalled nodes for diagnosis.
+                let stalled: Vec<String> = block_nodes
+                    .iter()
+                    .filter(|nid| !emitted[**nid])
+                    .map(|nid| {
+                        format!(
+                            "n{} deps {:?}",
+                            nid,
+                            g.nodes[*nid].inputs
+                        )
+                    })
+                    .collect();
+                return Err(EngineError::IrVerificationFailed(format!(
+                    "block {bi} schedule stalled: {stalled:?}"
+                )));
             }
         }
         emit_phi_copies(&mut e, g, bi, &slot_of)?;
@@ -224,7 +287,21 @@ pub fn lower(
             trap_ret_offsets: node_trap_rets.get(node).cloned().unwrap_or_default(),
         })
         .collect();
-    Ok(CompiledCode { bytes: e.as_slice().to_vec(), deopt, slots: next_slot })
+    // Return type: the bottom stack node's type at the Halt site, or the
+    // Ret node's type.
+    let return_tag = g
+        .halt
+        .and_then(|h| {
+            deopt_sites
+                .iter()
+                .find(|(n, _)| *n == h)
+                .and_then(|(_, s)| s.stack.first().map(|(_, t)| vtype_to_tag(*t)))
+        })
+        .or_else(|| {
+            g.ret.map(|r| vtype_to_tag(g.nodes[r.0 as usize].ty))
+        })
+        .unwrap_or(TypeTag::Null);
+    Ok(CompiledCode { bytes: e.as_slice().to_vec(), deopt, slots: next_slot, return_tag })
 }
 
 /// Runtime helper addresses.
@@ -428,7 +505,7 @@ fn emit_phi_copies(e: &mut Emitter, g: &Graph, bi: usize, slot_of: &[u32]) -> Re
             .unwrap_or(0);
         for nid in 0..g.nodes.len() {
             let n = &g.nodes[nid];
-            if n.block.0 != head.0 {
+            if n.block.0 != s as u32 {
                 continue;
             }
             let NodeKind::Phi { .. } = n.kind else { continue };
@@ -474,6 +551,7 @@ fn emit_node(
     helper: &Helpers,
     callee_addrs: &[usize],
     _block: usize,
+    deopt_sites: &[(NodeId, crate::cold::ir::DeoptSite)],
 ) -> Result<Vec<u32>, EngineError> {
     let node = &g.nodes[nid.0 as usize];
     let slot = slot_of[nid.0 as usize];
@@ -493,8 +571,10 @@ fn emit_node(
         | NodeKind::Phi { .. }
         | NodeKind::If => {}
         NodeKind::UncommonTrap { .. } => {
-            // Reachable only through a bug: defined trap.
-            e.ud2();
+            // Guards lower through the runtime helpers' own checks
+            // (LoadIdx/StoreIdx/NewArray arms and the Div arm); the IR
+            // guard chain is metadata. Emit nothing: an ud2 here would sit
+            // in the linear fallthrough path.
         }
         NodeKind::ConstNum(f) => {
             e.movabs(0, f.to_bits());
@@ -524,7 +604,8 @@ fn emit_node(
         NodeKind::Div => {
             let x = node.inputs[0];
             let y = node.inputs[1];
-            // Zero guard on y.
+            // Zero guard on y; the trap block sits after a jump-over so the
+            // fallthrough path never reaches it (mirrors the T0 template).
             load_slot_xmm0(e, slot_of[y.0 as usize]);
             e.xorps(3, 3);
             e.ucomisd(0, 3);
@@ -532,11 +613,9 @@ fn emit_node(
             let div_path = e.label();
             let nan_check = e.label();
             let done = e.label();
+            let end = e.label();
             e.jcc(Cc::P, div_path); // NaN divisor: no trap, result NaN
             e.jcc(Cc::Eq, trap);
-            e.bind(trap);
-            trap_rets.push(emit_trap_call(e, helper.trap_div0));
-            e.ud2();
             e.bind(div_path);
             load_slot_xmm0(e, slot_of[x.0 as usize]);
             load_slot_xmm1(e, slot_of[y.0 as usize]);
@@ -549,6 +628,11 @@ fn emit_node(
             e.bind(nan_check);
             store_slot_xmm0(e, slot);
             e.bind(done);
+            e.jmp(end);
+            e.bind(trap);
+            trap_rets.push(emit_trap_call(e, helper.trap_div0));
+            e.ud2();
+            e.bind(end);
         }
         NodeKind::Mod => {
             let x = node.inputs[0];
@@ -784,10 +868,28 @@ fn emit_node(
             e.epilogue();
         }
         NodeKind::Halt => {
-            e.emit(&[0x31, 0xC0]);
-            e.emit(&[0x31, 0xD2]);
-            e.epilogue();
+            // The interpreter's Halt returns the bottom of the value stack;
+            // the halt's recorded site carries the stack shape.
+            let bottom = deopt_sites
+                .iter()
+                .find(|(n, _)| *n == nid)
+                .and_then(|(_, s)| s.stack.first().copied());
+            match bottom {
+                Some((bnode, bty)) => {
+                    load_slot_rax(e, slot_of[bnode.0 as usize]);
+                    e.emit(&[0x31, 0xD2]); // xor edx,edx
+                    e.epilogue();
+                    // The return tag is read by lower() from the site.
+                    let _ = bty;
+                }
+                None => {
+                    e.emit(&[0x31, 0xC0]);
+                    e.emit(&[0x31, 0xD2]);
+                    e.epilogue();
+                }
+            }
         }
     }
     Ok(trap_rets)
 }
+// PROBE 12345

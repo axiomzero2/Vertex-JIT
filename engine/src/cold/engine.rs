@@ -46,6 +46,8 @@ pub struct CompiledFn {
     pub entry: usize,
     /// Code metadata (deopt records, slots).
     pub code: codegen::CompiledCode,
+    /// Static type of the returned word (typed decode, doc/value.md).
+    pub return_tag: crate::hot::value::TypeTag,
 }
 
 // SAFETY: base points into the engine's code cache; the cache owns the
@@ -299,7 +301,9 @@ impl JitEngine {
                                 bytes: c.bytes,
                                 deopt: Vec::new(),
                                 slots: c.max_stack,
+                                return_tag: c.return_tag,
                             },
+                            return_tag: c.return_tag,
                         });
                         self.stats.compiled[1] += 1;
                     }
@@ -349,7 +353,7 @@ impl JitEngine {
             }
         };
         // Explicit, versioned pass pipeline (standard 38.20).
-        let mut graph = lifted.graph;
+        let ir::Lifted { graph: mut graph, deopt_sites: mut sites } = lifted;
         for name in passes::passes_for_tier(match tier {
             Tier::T1 => 1,
             Tier::T2 => 2,
@@ -358,7 +362,7 @@ impl JitEngine {
             if *name == "verify" {
                 ir::verify(&graph).map_err(EngineError::IrVerificationFailed)?;
             } else {
-                passes::run_pass(name, &mut graph, &self.pass_budgets)
+                passes::run_pass(name, &mut graph, &mut sites, &self.pass_budgets)
                     .map_err(EngineError::IrVerificationFailed)?;
             }
         }
@@ -383,13 +387,7 @@ impl JitEngine {
             load_elem: crate::hot::runtime::jit_load_elem as usize,
             poll: crate::hot::runtime::jit_safepoint_poll as usize,
         };
-        let code = codegen::lower(
-            &graph,
-            &lifted.deopt_sites,
-            self.target.avx2,
-            &helper,
-            &callee_addrs,
-        )?;
+        let code = codegen::lower(&graph, &sites, self.target.avx2, &helper, &callee_addrs)?;
         let base = self.cache.allocate(code.bytes.len() as u32)?;
         // CEP:UNSAFE: write of engine-generated code into the RW window.
         // CEP:WHAT: T1+ publication.
@@ -409,11 +407,13 @@ impl JitEngine {
             _ => 4,
         };
         self.stats.compiled[idx] += 1;
+        let return_tag = code.return_tag;
         self.compiled[fn_id as usize] = Some(CompiledFn {
             tier,
             base,
             entry: base as usize,
             code,
+            return_tag,
         });
         Ok(())
     }
@@ -477,8 +477,14 @@ impl JitEngine {
         let outcome = with_trampoline(&mut self.heap, base, entry);
         match outcome {
             Ok(TrampOutcome::Returned(word)) => {
-                // Function returned a value: pop the activation.
-                let v = Value::decode(word);
+                // Function returned a value: pop the activation. The word
+                // decodes with the compiled function's static return type
+                // (doc/value.md: raw words are ambiguous).
+                let tag = self.compiled[fn_id as usize]
+                    .as_ref()
+                    .map(|c| c.return_tag)
+                    .unwrap_or(crate::hot::value::TypeTag::Number);
+                let v = Value::decode_typed(word, tag);
                 if frames.len() == 1 {
                     return Ok(Some(Exit::Returned(v)));
                 }
@@ -598,12 +604,12 @@ impl JitEngine {
             Ok(l) => l,
             Err(_) => return Ok(None), // stay interpreted (documented)
         };
-        let mut graph = lifted.graph;
+        let ir::Lifted { graph: mut graph, deopt_sites: mut sites } = lifted;
         for name in passes::passes_for_tier(2) {
             if *name == "verify" {
                 ir::verify(&graph).map_err(EngineError::IrVerificationFailed)?;
             } else {
-                passes::run_pass(name, &mut graph, &self.pass_budgets)
+                passes::run_pass(name, &mut graph, &mut sites, &self.pass_budgets)
                     .map_err(EngineError::IrVerificationFailed)?;
             }
         }
@@ -616,15 +622,14 @@ impl JitEngine {
             load_elem: crate::hot::runtime::jit_load_elem as usize,
             poll: crate::hot::runtime::jit_safepoint_poll as usize,
         };
-        let code = codegen::lower(&graph, &lifted.deopt_sites, self.target.avx2, &helper, &[])?;
+        let code = codegen::lower(&graph, &sites, self.target.avx2, &helper, &[])?;
         // OSR entry: the compiled function runs from its entry; the
         // interpreter frame's locals are seeded through the deopt record
         // of the site's safepoint (locals list). For this engine version
         // the OSR entry executes the whole function with the recorded
         // locals; the value stack at a back-edge is empty by the merge
         // contract (doc/osr.md).
-        let site_rec = lifted
-            .deopt_sites
+        let site_rec = sites
             .iter()
             .find(|(n, s)| matches!(graph.nodes[n.0 as usize].kind, ir::NodeKind::Safepoint) && s.bc_pc == site + 1)
             .map(|(_, s)| s.clone());
@@ -644,11 +649,13 @@ impl JitEngine {
             std::ptr::copy_nonoverlapping(code.bytes.as_ptr(), base, code.bytes.len());
         }
         self.cache.seal(base)?;
+        let return_tag = code.return_tag;
         self.compiled[fn_id as usize] = Some(CompiledFn {
             tier: Tier::T2,
             base,
             entry: base as usize,
             code,
+            return_tag,
         });
         self.tiers[fn_id as usize] = Tier::T2;
         self.stats.osr_entries += 1;
