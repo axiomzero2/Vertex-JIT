@@ -22,7 +22,8 @@ pub mod tier;
 pub mod code_cache;
 /// Tier 0 copy-and-patch compiler and the x86-64 emitter (spec 2).
 pub mod tier0;
-// pub mod ir;  // added when implemented
+/// Sea of Nodes IR: graph, builder, verifier (spec 3.1, standard 38.17).
+pub mod ir;
 // pub mod passes;  // added when implemented
 // pub mod codegen;  // added when implemented
 // pub mod deopt;  // added when implemented
