@@ -12,7 +12,7 @@ Status: **Draft standard**
 
 # 1. Purpose
 
-CEP&CC 0.2 is a coding standard for C++26 codebases that require both of the following properties simultaneously:
+CEP&CC 0.3 is a coding standard for C++26 codebases that require both of the following properties simultaneously:
 
 1. **Cycle-exact performance discipline**  
    Performance is treated as a correctness requirement, not as a vague goal.
