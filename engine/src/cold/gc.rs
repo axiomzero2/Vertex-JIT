@@ -155,12 +155,11 @@ pub fn mark_from(heap: &mut Heap, ptr: usize) {
             // CEP:EVIDENCE: tests/gc_tests.rs.
             // CEP:SECURITY: foreign words are never dereferenced.
             let w = unsafe { *((p + 16 + 8 * i) as *const u64) };
-            if let Some(child) = heap.root_ptr_of(w) {
-                if !heap.marked(child) {
+            if let Some(child) = heap.root_ptr_of(w)
+                && !heap.marked(child) {
                     heap.set_mark(child);
                     work.push(child);
                 }
-            }
         }
     }
 }
@@ -268,11 +267,10 @@ pub fn scan_dirty_cards(heap: &mut Heap) {
             // CEP:EVIDENCE: tests/gc_tests.rs.
             // CEP:SECURITY: filtered words only.
             let w = unsafe { *((p + 16 + 8 * i) as *const u64) };
-            if let Some(c) = heap.root_ptr_of(w) {
-                if heap.in_young(c) {
+            if let Some(c) = heap.root_ptr_of(w)
+                && heap.in_young(c) {
                     targets.push(c);
                 }
-            }
         }
     });
     for t in targets {
@@ -318,19 +316,17 @@ pub fn frame_roots(frames: &[crate::hot::interp::FnFrame]) -> Vec<usize> {
     let mut roots = Vec::new();
     for f in frames {
         for i in 0..f.stack.len() {
-            if let Some(v) = f.stack.get(i) {
-                if let Value::Obj(p) = v {
+            if let Some(v) = f.stack.get(i)
+                && let Value::Obj(p) = v {
                     roots.push(p);
                 }
-            }
         }
         for l in &f.locals {
             for i in 0..l.len() {
-                if let Some(v) = l.get(i) {
-                    if let Value::Obj(p) = v {
+                if let Some(v) = l.get(i)
+                    && let Value::Obj(p) = v {
                         roots.push(p);
                     }
-                }
             }
         }
     }

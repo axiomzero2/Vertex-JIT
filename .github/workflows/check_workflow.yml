@@ -44,3 +44,45 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  engine-test:
+    name: engine tests (vertex-jit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: cargo test (engine)
+        working-directory: engine
+        run: cargo test --all-features
+      - name: cargo clippy (engine)
+        working-directory: engine
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo doc (engine)
+        working-directory: engine
+        run: cargo doc --no-deps --document-private-items
+
+  cep-lint:
+    name: cep_lint self-verification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: build (warnings as errors)
+        run: tools/cep_lint/build.sh
+      - name: self-test
+        run: tools/cep_lint/build/cep_lint --self-test
+      - name: self-lint gate
+        run: tools/cep_lint/build/cep_lint tools/cep_lint/src
+      - name: sanitizer self-test
+        run: |
+          MODE=asan tools/cep_lint/build.sh
+          tools/cep_lint/build/cep_lint --self-test
+          MODE= tools/cep_lint/build.sh

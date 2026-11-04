@@ -91,7 +91,7 @@ pub fn reconstruct_from_record(
     let Some(func) = funcs.get(fn_id as usize) else {
         return Err(EngineError::DeoptFailed("fn id out of range"));
     };
-    if rsp > rbp || (rbp - rsp) % 8 != 0 {
+    if rsp > rbp || !(rbp - rsp).is_multiple_of(8) {
         return Err(EngineError::DeoptFailed("frame shape mismatch"));
     }
     let mut frame = interp.make_frame(fn_id, func)?;

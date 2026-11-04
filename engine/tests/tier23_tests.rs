@@ -36,9 +36,12 @@ fn map_program() -> Function {
     //   i = 0; while i < 8 { out[i] = src[i] * 2; i = i + 1 }
     //   return out[7]  (= 16)
     let num = |f: f64| Insn { op: Op::PushNumber, operand: Operand::F64(f) };
-    let mut code: Vec<Insn> = Vec::new();
-    // src = NEWARR(8)
-    code.push(num(8.0));
+    let mut code: Vec<Insn> = vec![
+        // src = NEWARR(8)
+        num(8.0),
+    ];
+    #[allow(clippy::vec_init_then_push)]
+    {
     code.push(Insn { op: Op::NewArray, operand: Operand::None });
     code.push(Insn { op: Op::StoreVar, operand: Operand::Slot(0) });
     // out = NEWARR(8)
@@ -84,6 +87,7 @@ fn map_program() -> Function {
     code.push(num(7.0));
     code.push(Insn { op: Op::LoadIdx, operand: Operand::None });
     code.push(Insn { op: Op::Halt, operand: Operand::None });
+    }
     Function {
         name: "map8".to_owned(),
         locals: vec!["src".to_owned(), "out".to_owned(), "i".to_owned()],
@@ -109,7 +113,6 @@ fn run_at(f: &Function, tier: Tier) -> Result<Option<Value>, String> {
     }
 }
 
-#[test]
 #[test]
 fn t2_gvn_eliminates_cross_block_duplicates() {
     // Two identical computations separated by a diamond; GVN must collapse

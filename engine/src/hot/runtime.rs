@@ -427,8 +427,23 @@ pub extern "C" fn jit_store_elem(arr: u64, idx: f64, val: u64) -> u64 {
 /// CEP:COST: Heap::load_word cost.
 /// CEP:EVIDENCE: tests/t1_exec.rs.
 /// CEP:SECURITY: index validated inside load_word.
+/// FFI-safe pair return (a repr(C) struct instead of a tuple, which has
+/// no defined C ABI).
+#[repr(C)]
+pub struct LoadedPair {
+    /// Value word.
+    pub value: u64,
+    /// Type tag word.
+    pub tag: u64,
+}
+
+/// Checked element load called from generated code; returns the word and
+/// a tag word (0 = ok, 1 = out of bounds), never fails.
+///
+/// CEP:WHAT: Runtime array element load.
+/// CEP:STATUS: complete
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_load_elem(arr: u64, idx: f64) -> (u64, u64) {
+pub extern "C" fn jit_load_elem(arr: u64, idx: f64) -> LoadedPair {
     TRAMPOLINE.with(|t| {
         let t = t.borrow();
         match t.heap {
@@ -443,12 +458,12 @@ pub extern "C" fn jit_load_elem(arr: u64, idx: f64) -> (u64, u64) {
                 // CEP:SECURITY: bounds checked inside load_word.
                 unsafe {
                     match (*h).load_word(arr as usize, idx) {
-                        Ok(w) => (w, 0),
-                        Err(_) => (0, 1),
+                        Ok(w) => LoadedPair { value: w, tag: 0 },
+                        Err(_) => LoadedPair { value: 0, tag: 1 },
                     }
                 }
             }
-            None => (0, 1),
+            None => LoadedPair { value: 0, tag: 1 },
         }
     })
 }

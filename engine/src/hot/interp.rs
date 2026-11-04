@@ -285,7 +285,8 @@ impl Interp {
         })
     }
 
-    /// Run the function table until exit or budget exhaustion.
+#[allow(clippy::too_many_arguments)]
+        /// Run the function table until exit or budget exhaustion.
     ///
     /// CEP:WHAT: The dispatch loop implementing reference semantics.
     /// CEP:WHY: Every tier is differentially tested against this loop.
@@ -620,9 +621,9 @@ impl Interp {
             let Some(func) = funcs.get(top.fn_id as usize) else {
                 return Err(EngineError::PcOutOfRange(top.fn_id as usize));
             };
-            if let Some(i) = func.code.get(cur) {
-                if let Operand::Target(t) = i.operand {
-                    if matches!(i.op, Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue)
+            if let Some(i) = func.code.get(cur)
+                && let Operand::Target(t) = i.operand
+                    && matches!(i.op, Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue)
                         && (t as usize) <= cur
                     {
                         let Some(profile) = profiles.get_mut(top.fn_id as usize) else {
@@ -636,8 +637,6 @@ impl Interp {
                             return Ok(Exit::BackEdgeBudget { fn_id, site: cur as u32 });
                         }
                     }
-                }
-            }
         }
     }
 }

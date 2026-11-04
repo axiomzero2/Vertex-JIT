@@ -96,9 +96,9 @@ pub fn lower(
     // Slot allocation: scalars 1 slot, vectors VEC_SLOTS.
     let mut slot_of = vec![0u32; g.nodes.len()];
     let mut next_slot = 0u32;
-    for i in 0..g.nodes.len() {
+    for (i, node) in g.nodes.iter().enumerate() {
         slot_of[i] = next_slot;
-        next_slot += match g.nodes[i].kind {
+        next_slot += match node.kind {
             NodeKind::VecLoad { .. }
             | NodeKind::VecAddConst { .. }
             | NodeKind::VecSubConst { .. }
@@ -560,11 +560,6 @@ fn emit_node(
     let node = &g.nodes[nid.0 as usize];
     let slot = slot_of[nid.0 as usize];
     let mut trap_rets: Vec<u32> = Vec::new();
-    macro_rules! done {
-        () => {{
-            return Ok(trap_rets);
-        }};
-    }
     match &node.kind {
         NodeKind::Start
         | NodeKind::Region

@@ -136,20 +136,20 @@ fn t0_locals_and_loop() {
             Insn { op: Op::LoadVar, operand: Operand::Slot(0) },
             Insn { op: Op::PushNumber, operand: Operand::F64(3.0) },
             Insn { op: Op::LessThan, operand: Operand::None },
-            Insn { op: Op::JumpIfFalse, operand: Operand::Target(9) },
+            Insn { op: Op::JumpIfFalse, operand: Operand::Target(11) },
             Insn { op: Op::LoadVar, operand: Operand::Slot(0) },
             Insn { op: Op::PushNumber, operand: Operand::F64(1.0) },
             Insn { op: Op::Add, operand: Operand::None },
             Insn { op: Op::AssignVar, operand: Operand::Slot(0) },
             Insn { op: Op::Jump, operand: Operand::Target(2) },
-            // pc 10: fallthrough LoadVar, Halt
+            // pc 11: loop exit; pc 12: Halt
             Insn { op: Op::LoadVar, operand: Operand::Slot(0) },
             Insn { op: Op::Halt, operand: Operand::None },
         ],
     };
-    // Fix the jump target: JUMP_IF_FALSE at pc 5 targets pc 10.
-    let mut f = f;
-    f.code[5].operand = Operand::Target(10);
+    // JUMP_IF_FALSE at pc 5 exits the loop at pc 11 (the fallthrough
+    // LoadVar). Targeting pc 10 instead re-enters the unconditional JUMP
+    // and the loop never terminates.
     let (w, _) = exec_t0(&f);
     assert_eq!(f64::from_bits(w), 3.0);
 }

@@ -74,17 +74,17 @@ pub enum Opcode {
     JumpIfTrue = 42,
     /// Move the top of the jump stack into pc (legacy return convention).
     JumpLastOnStack = 43,
-    /// Allocate an array (pops length; pushes reference). [extension]
+    /// Allocate an array (pops length; pushes reference). \[extension\]
     NewArray = 70,
-    /// Array length (pops array; pushes length). [extension]
+    /// Array length (pops array; pushes length). \[extension\]
     ArrayLen = 73,
-    /// Element load (pops index, array; pushes word). [extension]
+    /// Element load (pops index, array; pushes word). \[extension\]
     LoadIdx = 71,
-    /// Element store (pops value, index, array). [extension]
+    /// Element store (pops value, index, array). \[extension\]
     StoreIdx = 72,
-    /// Call function by id; operand packs (argc<<32)|callee. [extension]
+    /// Call function by id; operand packs (argc<<32)|callee. \[extension\]
     Call = 74,
-    /// Return the top of stack to the caller. [extension]
+    /// Return the top of stack to the caller. \[extension\]
     Ret = 75,
     /// Pop and discard a variable binding (slot operand).
     Drop = 125,

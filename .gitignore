@@ -16,3 +16,6 @@ src/runtime_lib/target/
 *git_repo_setup.sh
 # Test vertex code
 /testingCode/priyanshu/
+
+# cep_lint build output
+tools/cep_lint/build/

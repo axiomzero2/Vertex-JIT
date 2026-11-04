@@ -27,7 +27,6 @@
 //               contracts.
 
 use crate::cold::ir::{self, DeoptSite, Graph, NodeId, NodeKind, VType};
-use crate::hot::value::TypeTag;
 use std::collections::BTreeMap;
 
 /// Pass name constants: the canonical pipeline (standard 38.20).
@@ -319,6 +318,7 @@ fn replace_all(g: &mut Graph, sites: &mut [(NodeId, DeoptSite)], from: NodeId, t
 /// # Errors
 /// Internal inconsistency.
 pub fn local_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
+    let doms = ir::idoms(g);
     let mut table: BTreeMap<String, NodeId> = BTreeMap::new();
     for i in 0..g.nodes.len() {
         let node = &g.nodes[i];
@@ -327,11 +327,20 @@ pub fn local_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>
         }
         let key = node_key(g, NodeId(i as u32));
         if let Some(existing) = table.get(&key) {
-            let repl = *existing;
-            replace_all(g, sites, NodeId(i as u32), repl);
-        } else {
-            table.insert(key, NodeId(i as u32));
+            // The replacement must dominate the use's block. A value only
+            // defines the same computation on paths where it executes; a
+            // block skipped at runtime (a trip-0 loop body) leaves the
+            // slot unwritten and the use reads stale memory. Cross-block
+            // equal values that do not dominate stay in the table.
+            let b = node.block.0 as usize;
+            let eb = g.nodes[existing.0 as usize].block.0 as usize;
+            if ir::dominates(&doms, eb, b) {
+                let repl = *existing;
+                replace_all(g, sites, NodeId(i as u32), repl);
+                continue;
+            }
         }
+        table.insert(key, NodeId(i as u32));
     }
     dead_code_elimination(g, sites)
 }
@@ -579,62 +588,7 @@ pub fn dead_code_elimination(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>
 /// CEP:COST: O(blocks^2) worst case; block counts are budget-bounded.
 /// CEP:EVIDENCE: dominance-dependent pass tests.
 /// CEP:SECURITY: none
-fn idoms(g: &Graph) -> Vec<usize> {
-    let nb = g.blocks.len();
-    let mut idom = vec![usize::MAX; nb];
-    if nb == 0 {
-        return idom;
-    }
-    idom[0] = 0;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in 1..nb {
-            let mut new_idom = usize::MAX;
-            for p in &g.blocks[bi].preds {
-                let p = p.0 as usize;
-                if idom[p] == usize::MAX {
-                    continue;
-                }
-                new_idom = if new_idom == usize::MAX { p } else { intersect(&idom, p, new_idom) };
-            }
-            if new_idom != usize::MAX && idom[bi] != new_idom {
-                idom[bi] = new_idom;
-                changed = true;
-            }
-        }
-    }
-    idom
-}
-
-/// Walk to the common dominator ancestor.
-fn intersect(idom: &[usize], mut a: usize, mut b: usize) -> usize {
-    while a != b {
-        while a > b {
-            a = idom[a];
-        }
-        while b > a {
-            b = idom[b];
-        }
-    }
-    a
-}
-
-/// True when block a dominates block b.
-fn dominates(doms: &[usize], a: usize, b: usize) -> bool {
-    let mut cur = b;
-    while cur != usize::MAX {
-        if cur == a {
-            return true;
-        }
-        if cur == 0 {
-            return a == 0;
-        }
-        cur = doms[cur];
-    }
-    false
-}
-
+///
 /// Global value numbering across the dominator tree.
 ///
 /// CEP:HPC-PASS-KIND: global CSE.
@@ -649,7 +603,7 @@ fn dominates(doms: &[usize], a: usize, b: usize) -> bool {
 /// # Errors
 /// Internal inconsistency.
 pub fn global_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), String> {
-    let doms = idoms(g);
+    let doms = ir::idoms(g);
     let mut table: BTreeMap<String, NodeId> = BTreeMap::new();
     for i in 0..g.nodes.len() {
         let node = &g.nodes[i];
@@ -660,7 +614,7 @@ pub fn global_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)
         if let Some(existing) = table.get(&key) {
             let b = node.block.0 as usize;
             let eb = g.nodes[existing.0 as usize].block.0 as usize;
-            if dominates(&doms, eb, b) {
+            if ir::dominates(&doms, eb, b) {
                 let repl = *existing;
                 replace_all(g, sites, NodeId(i as u32), repl);
                 continue;
@@ -685,12 +639,12 @@ pub fn global_value_numbering(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)
 /// # Errors
 /// Internal inconsistency.
 pub fn licm(g: &mut Graph) -> Result<(), String> {
-    let doms = idoms(g);
+    let doms = ir::idoms(g);
     let mut loops: Vec<(usize, Vec<usize>)> = Vec::new();
     for bi in 0..g.blocks.len() {
         for s in &g.blocks[bi].succs {
             let h = s.0 as usize;
-            if dominates(&doms, h, bi) {
+            if ir::dominates(&doms, h, bi) {
                 // Natural loop of the back-edge bi -> h: {h} plus all blocks
                 // reaching bi without passing through h. The header's own
                 // predecessors are never expanded (a self-loop's body is
@@ -812,12 +766,11 @@ pub fn pea(g: &mut Graph, sites: &mut Vec<(NodeId, DeoptSite)>) -> Result<(), St
                         accesses.push((j, usize::MAX, None));
                     }
                 }
-                NodeKind::Return | NodeKind::Call { .. } => {
-                    if node.inputs.contains(&arr) {
+                NodeKind::Return | NodeKind::Call { .. }
+                    if node.inputs.contains(&arr) => {
                         escapes = true;
                         break 'uses;
                     }
-                }
                 _ => {}
             }
         }
@@ -1045,12 +998,11 @@ fn find_static_map_loops(g: &Graph, budgets: &PassBudgets) -> Result<Vec<LoopCan
         let mut bound = None;
         for j in 0..g.nodes.len() {
             let NodeKind::Lt = g.nodes[j].kind else { continue };
-            if g.nodes[j].inputs[0] == idx {
-                if let Some(F::Num(b)) = const_of(g, g.nodes[j].inputs[1]) {
+            if g.nodes[j].inputs[0] == idx
+                && let Some(F::Num(b)) = const_of(g, g.nodes[j].inputs[1]) {
                     bound = Some(b);
                     break;
                 }
-            }
         }
         let Some(bound) = bound else { continue };
         if bound <= start || (bound - start) > f64::from(budgets.max_static_trip) {

@@ -129,8 +129,8 @@ impl JitEngine {
         let heap = Heap::new(1024 * 1024, 4 * 1024 * 1024)?;
         let cache = CodeCache::new(target, budgets.code_cache_bytes)?;
         let lib = TemplateLibrary::new(
-            crate::hot::runtime::jit_fmod as usize,
-            crate::hot::runtime::jit_trap_div0 as usize,
+            crate::hot::runtime::jit_fmod as *const () as usize,
+            crate::hot::runtime::jit_trap_div0 as *const () as usize,
         );
         let n = funcs.len();
         Ok(JitEngine {
@@ -353,7 +353,7 @@ impl JitEngine {
             }
         };
         // Explicit, versioned pass pipeline (standard 38.20).
-        let ir::Lifted { graph: mut graph, deopt_sites: mut sites } = lifted;
+        let ir::Lifted { mut graph, deopt_sites: mut sites } = lifted;
         for name in passes::passes_for_tier(match tier {
             Tier::T1 => 1,
             Tier::T2 => 2,
@@ -379,13 +379,13 @@ impl JitEngine {
             })
             .collect();
         let helper = Helpers {
-            fmod: crate::hot::runtime::jit_fmod as usize,
-            trap_div0: crate::hot::runtime::jit_trap_div0 as usize,
-            trap_bounds: crate::hot::runtime::jit_trap_bounds as usize,
-            alloc: crate::hot::runtime::jit_alloc as usize,
-            store_elem: crate::hot::runtime::jit_store_elem as usize,
-            load_elem: crate::hot::runtime::jit_load_elem as usize,
-            poll: crate::hot::runtime::jit_safepoint_poll as usize,
+            fmod: crate::hot::runtime::jit_fmod as *const () as usize,
+            trap_div0: crate::hot::runtime::jit_trap_div0 as *const () as usize,
+            trap_bounds: crate::hot::runtime::jit_trap_bounds as *const () as usize,
+            alloc: crate::hot::runtime::jit_alloc as *const () as usize,
+            store_elem: crate::hot::runtime::jit_store_elem as *const () as usize,
+            load_elem: crate::hot::runtime::jit_load_elem as *const () as usize,
+            poll: crate::hot::runtime::jit_safepoint_poll as *const () as usize,
         };
         let code = codegen::lower(&graph, &sites, self.target.avx2, &helper, &callee_addrs)?;
         let base = self.cache.allocate(code.bytes.len() as u32)?;
@@ -434,12 +434,11 @@ impl JitEngine {
     fn compile_callees_of(&mut self, func: &Function) -> Result<(), EngineError> {
         let mut callees: Vec<u32> = Vec::new();
         for insn in &func.code {
-            if insn.op == Opcode::Call {
-                if let crate::cold::bytecode::Operand::U64(packed) = insn.operand {
+            if insn.op == Opcode::Call
+                && let crate::cold::bytecode::Operand::U64(packed) = insn.operand {
                     let callee = (packed & 0xFFFF_FFFF) as u32;
                     callees.push(callee);
                 }
-            }
         }
         for c in callees {
             if self.compiled[c as usize].is_none() && self.tiers[c as usize] != Tier::Interp {
@@ -489,11 +488,10 @@ impl JitEngine {
                     return Ok(Some(Exit::Returned(v)));
                 }
                 let _ = frames.pop();
-                if let Some(caller) = frames.last_mut() {
-                    if caller.stack.push(v).is_none() {
+                if let Some(caller) = frames.last_mut()
+                    && caller.stack.push(v).is_none() {
                         return Err(EngineError::OutOfMemory);
                     }
-                }
                 Ok(None)
             }
             Ok(TrampOutcome::Trapped(state)) => {
@@ -507,7 +505,7 @@ impl JitEngine {
                     ));
                 }
                 // Map the trap site to a deopt record and reconstruct.
-                let cf = self.compiled[fn_id as usize].as_ref().ok_or_else(|| {
+                let cf = self.compiled[fn_id as usize].as_ref().ok_or({
                     EngineError::DeoptFailed("compiled code vanished mid-trap")
                 })?;
                 let (bc_pc, mut new_frames) =
@@ -578,7 +576,7 @@ impl JitEngine {
     fn try_osr(
         &mut self,
         fn_id: u32,
-        frames: &mut Vec<FnFrame>,
+        frames: &mut [FnFrame],
         host: &HostHooks,
     ) -> Result<Option<Exit>, EngineError> {
         // Find the hottest back-edge site from the profile.
@@ -604,7 +602,7 @@ impl JitEngine {
             Ok(l) => l,
             Err(_) => return Ok(None), // stay interpreted (documented)
         };
-        let ir::Lifted { graph: mut graph, deopt_sites: mut sites } = lifted;
+        let ir::Lifted { mut graph, deopt_sites: mut sites } = lifted;
         for name in passes::passes_for_tier(2) {
             if *name == "verify" {
                 ir::verify(&graph).map_err(EngineError::IrVerificationFailed)?;
@@ -614,13 +612,13 @@ impl JitEngine {
             }
         }
         let helper = Helpers {
-            fmod: crate::hot::runtime::jit_fmod as usize,
-            trap_div0: crate::hot::runtime::jit_trap_div0 as usize,
-            trap_bounds: crate::hot::runtime::jit_trap_bounds as usize,
-            alloc: crate::hot::runtime::jit_alloc as usize,
-            store_elem: crate::hot::runtime::jit_store_elem as usize,
-            load_elem: crate::hot::runtime::jit_load_elem as usize,
-            poll: crate::hot::runtime::jit_safepoint_poll as usize,
+            fmod: crate::hot::runtime::jit_fmod as *const () as usize,
+            trap_div0: crate::hot::runtime::jit_trap_div0 as *const () as usize,
+            trap_bounds: crate::hot::runtime::jit_trap_bounds as *const () as usize,
+            alloc: crate::hot::runtime::jit_alloc as *const () as usize,
+            store_elem: crate::hot::runtime::jit_store_elem as *const () as usize,
+            load_elem: crate::hot::runtime::jit_load_elem as *const () as usize,
+            poll: crate::hot::runtime::jit_safepoint_poll as *const () as usize,
         };
         let code = codegen::lower(&graph, &sites, self.target.avx2, &helper, &[])?;
         // OSR entry: the compiled function runs from its entry; the

@@ -209,7 +209,7 @@ pub struct Graph {
     pub ret: Option<NodeId>,
     /// Halt node (None for Return-only graphs).
     pub halt: Option<NodeId>,
-    /// For each block with a conditional terminator: whether succs[0] is
+    /// For each block with a conditional terminator: whether `succs[0]` is
     /// the condition-true side. None for non-conditional blocks. Recorded
     /// at lift time so codegen needs no head-node heuristics (doc/ir.md).
     pub taken_sides: Vec<Option<bool>>,
@@ -437,7 +437,7 @@ pub fn lift(
                 return Err(LiftError::BadTarget);
             }
             is_leader[t] = true;
-            if insn.op != Opcode::Jump && pc + 1 <= n {
+            if insn.op != Opcode::Jump && pc < n {
                 is_leader[pc + 1] = true;
             }
         }
@@ -455,8 +455,8 @@ pub fn lift(
     let mut block_of = vec![BlockId(0); n];
     for (bi, &s) in starts.iter().enumerate() {
         let end = starts.get(bi + 1).copied().unwrap_or(n);
-        for pc in s..end {
-            block_of[pc] = BlockId(bi as u32);
+        for pc in &mut block_of[s..end] {
+            *pc = BlockId(bi as u32);
         }
     }
     let mut loop_header = vec![false; block_count];
@@ -468,6 +468,7 @@ pub fn lift(
             }
         }
     }
+
 
     let mut g = Graph {
         nodes: Vec::with_capacity(n * 2),
@@ -489,6 +490,12 @@ pub fn lift(
     let mut deopt_sites: Vec<(NodeId, DeoptSite)> = Vec::new();
     let mut entry_ctrl: Vec<Option<NodeId>> = vec![None; block_count];
     let mut entry_stack: Vec<Vec<NodeId>> = vec![Vec::new(); block_count];
+    // Variable environment captured when a block's first control edge is
+    // recorded; restored when the block is scanned. Branch-time snapshots
+    // are mandatory: the linear scan order does not match the CFG order,
+    // and a block scanned after an intervening predecessor would otherwise
+    // inherit that predecessor's assignments.
+    let mut entry_env: Vec<Option<Vec<NodeId>>> = vec![None; block_count];
     let mut extra: Vec<Vec<PendingEdge>> = vec![Vec::new(); block_count];
     entry_ctrl[0] = Some(start);
     let mut env: Vec<NodeId> = vec![NodeId(u32::MAX); func.locals.len()];
@@ -505,6 +512,13 @@ pub fn lift(
         let Some(ctrl0) = entry_ctrl[bi] else { continue };
         let mut ctrl = ctrl0;
         let mut stack = std::mem::take(&mut entry_stack[bi]);
+        // Restore the environment of the first control edge (loop exits are
+        // scanned after the loop body; without the restore, the exit path
+        // sees the body's assignments and the halt site records the
+        // back-edge value instead of the phi).
+        if let Some(snap) = entry_env[bi].take() {
+            env = snap;
+        }
         let start_pc = starts[bi];
         let end_pc = starts.get(bi + 1).copied().unwrap_or(n);
         g.blocks[bi].head = Some(ctrl);
@@ -539,13 +553,14 @@ pub fn lift(
             // definitions differ.
             let mut loop_slots: Vec<(u16, VType)> = Vec::new();
             if loop_header[bi] {
-                for s in 0..env.len() {
-                    if env[s].0 != u32::MAX {
-                        let ty = g.nodes[env[s].0 as usize].ty;
+                for (s, def) in env.iter().enumerate() {
+                    if def.0 != u32::MAX {
+                        let ty = g.nodes[def.0 as usize].ty;
                         loop_slots.push((s as u16, ty));
                     }
                 }
             }
+            #[allow(clippy::needless_range_loop)]
             for s in 0..env.len() {
                 let mut vals = Vec::with_capacity(extra_edges.len() + 2);
                 vals.push(env[s]);
@@ -561,14 +576,34 @@ pub fn lift(
                 let differs = vals.iter().any(|v| *v != vals[0]);
                 if is_loop_live || (!loop_header[bi] && differs) {
                     budget_check!();
+                    // A merge phi's type is its inputs' common type when
+                    // they agree; a numeric default would mis-decode a
+                    // boolean join at the halt tail (word 1 becomes a
+                    // subnormal, not Bool(true)).
+                    let common = |vals: &[NodeId]| -> VType {
+                        let Some(first) = vals.first().copied() else {
+                            return VType::Num;
+                        };
+                        if first.0 == u32::MAX {
+                            return VType::Num;
+                        }
+                        let t = g.nodes[first.0 as usize].ty;
+                        if vals.iter().all(|v| {
+                            v.0 != u32::MAX && g.nodes[v.0 as usize].ty == t
+                        }) {
+                            t
+                        } else {
+                            VType::Num
+                        }
+                    };
                     let ty = if is_loop_live {
                         loop_slots
                             .iter()
                             .find(|(sl, _)| *sl as usize == s)
                             .map(|(_, t)| *t)
-                            .unwrap_or(VType::Num)
+                            .unwrap_or_else(|| common(&vals))
                     } else {
-                        VType::Num
+                        common(&vals)
                     };
                     let p = g.alloc(
                         NodeKind::Phi { slot: s as u16 },
@@ -755,6 +790,13 @@ pub fn lift(
                     let Operand::Target(t) = insn.operand else {
                         return Err(LiftError::StackUnderflow);
                     };
+                    // Values live across a branch cannot be represented: the
+                    // per-edge state carries no value stack, so continuing
+                    // would silently drop them. Refuse and let the engine
+                    // fall back to the interpreter (standard 19: fail loud).
+                    if !stack.is_empty() {
+                        return Err(LiftError::UnbalancedStack);
+                    }
                     let tb = block_of[t as usize].0 as usize;
                     if (t as usize) <= pc {
                         close_loop(&mut g, bi, tb, ctrl, &env, &mut deopt_sites, t as usize, max_nodes)?;
@@ -764,6 +806,7 @@ pub fn lift(
                         if entry_ctrl[tb].is_none() {
                             entry_ctrl[tb] = Some(ctrl);
                             entry_stack[tb] = Vec::new();
+                            entry_env[tb] = Some(env.clone());
                         } else {
                             extra[tb].push(PendingEdge { ctrl, env: env.clone() });
                         }
@@ -776,6 +819,12 @@ pub fn lift(
                         return Err(LiftError::StackUnderflow);
                     };
                     let cond = stack.pop().ok_or(LiftError::StackUnderflow)?;
+                    // Same contract as the unconditional Jump: the operand
+                    // stack must be empty at a branch, or the shape is
+                    // outside the IR subset (fail loud, never silent).
+                    if !stack.is_empty() {
+                        return Err(LiftError::UnbalancedStack);
+                    }
                     budget_check!();
                     let ifn = g.alloc(NodeKind::If, vec![ctrl, cond], BlockId(bi as u32), VType::Control);
                     budget_check!();
@@ -796,6 +845,7 @@ pub fn lift(
                             if entry_ctrl[bi + 1].is_none() {
                                 entry_ctrl[bi + 1] = Some(skip);
                                 entry_stack[bi + 1] = Vec::new();
+                                entry_env[bi + 1] = Some(env_b.clone());
                             } else {
                                 extra[bi + 1].push(PendingEdge { ctrl: skip, env: env_b });
                             }
@@ -806,6 +856,7 @@ pub fn lift(
                         if entry_ctrl[tb].is_none() {
                             entry_ctrl[tb] = Some(take);
                             entry_stack[tb] = Vec::new();
+                            entry_env[tb] = Some(env_a.clone());
                         } else {
                             extra[tb].push(PendingEdge { ctrl: take, env: env_a });
                         }
@@ -815,6 +866,7 @@ pub fn lift(
                             if entry_ctrl[bi + 1].is_none() {
                                 entry_ctrl[bi + 1] = Some(skip);
                                 entry_stack[bi + 1] = Vec::new();
+                                entry_env[bi + 1] = Some(env_b.clone());
                             } else {
                                 extra[bi + 1].push(PendingEdge { ctrl: skip, env: env_b });
                             }
@@ -880,6 +932,7 @@ pub fn lift(
             g.blocks[bi + 1].preds.push(BlockId(bi as u32));
             if entry_ctrl[bi + 1].is_none() {
                 entry_ctrl[bi + 1] = Some(ctrl);
+                entry_env[bi + 1] = Some(env.clone());
             } else {
                 extra[bi + 1].push(PendingEdge { ctrl, env: env.clone() });
             }
@@ -958,22 +1011,28 @@ fn close_loop(
     }
     g.blocks[header].preds.push(BlockId(from as u32));
     let header_id = BlockId(header as u32);
+    // Patch the phi back-edge inputs and collect the header-safe values:
+    // at the header, a loop-carried slot's SSA value is the phi itself.
+    // Recording the back-edge environment instead would reference body
+    // definitions that do not dominate the header; a deopt on a trip-0
+    // iteration would then read a slot the body never wrote.
+    let mut header_env: Vec<NodeId> = env.to_vec();
     for i in 0..g.nodes.len() {
         let node = &mut g.nodes[i];
-        if node.block == header_id {
-            if let NodeKind::Phi { slot } = node.kind {
+        if node.block == header_id
+            && let NodeKind::Phi { slot } = node.kind {
                 let s = slot as usize;
                 if s < env.len() && env[s].0 != u32::MAX {
                     node.inputs[1] = env[s];
+                    header_env[s] = NodeId(i as u32);
                 }
             }
-        }
     }
     if g.nodes.len() as u32 >= max_nodes {
         return Err(LiftError::TooManyNodes);
     }
     let sp = g.alloc(NodeKind::Safepoint, vec![h], header_id, VType::Control);
-    record_site(g, sites, sp, bc_pc as u32, &[], env);
+    record_site(g, sites, sp, bc_pc as u32, &[], &header_env);
     Ok(())
 }
 
@@ -996,11 +1055,94 @@ fn close_loop(
 ///
 /// # Errors
 /// Stable textual description of the first violated invariant.
+pub(crate) fn idoms(g: &Graph) -> Vec<usize> {
+    let nb = g.blocks.len();
+    let mut idom = vec![usize::MAX; nb];
+    if nb == 0 {
+        return idom;
+    }
+    idom[0] = 0;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in 1..nb {
+            let mut new_idom = usize::MAX;
+            for p in &g.blocks[bi].preds {
+                let p = p.0 as usize;
+                if idom[p] == usize::MAX {
+                    continue;
+                }
+                new_idom = if new_idom == usize::MAX { p } else { intersect(&idom, p, new_idom) };
+            }
+            if new_idom != usize::MAX && idom[bi] != new_idom {
+                idom[bi] = new_idom;
+                changed = true;
+            }
+        }
+    }
+    idom
+}
+
+/// Walk to the common dominator ancestor.
+fn intersect(idom: &[usize], mut a: usize, mut b: usize) -> usize {
+    while a != b {
+        while a > b {
+            a = idom[a];
+        }
+        while b > a {
+            b = idom[b];
+        }
+    }
+    a
+}
+
+/// True when block a dominates block b.
+pub(crate) fn dominates(doms: &[usize], a: usize, b: usize) -> bool {
+    let mut cur = b;
+    while cur != usize::MAX {
+        if cur == a {
+            return true;
+        }
+        if cur == 0 {
+            return a == 0;
+        }
+        cur = doms[cur];
+    }
+    false
+}
+
+/// Verify one graph (standard 38.18): operand ranges, the Halt
+/// requirement, node arities, and — since the local-vn defect — that
+/// every data input dominates its use (38.18 contract: inputs dominate).
+///
+/// # Errors
+/// Returns the first structural violation.
 pub fn verify(g: &Graph) -> Result<(), String> {
+    let doms = idoms(g);
     for (i, node) in g.nodes.iter().enumerate() {
         for inp in &node.inputs {
             if inp.0 as usize >= g.nodes.len() {
                 return Err(format!("n{i}: input n{} out of range", inp.0));
+            }
+            // Data inputs must dominate the use: a definition on a path the
+            // use can skip (a trip-0 loop body) leaves its slot unwritten at
+            // the use and lowering reads stale memory. Control edges form
+            // the CFG cycle itself and phis merge non-dominating
+            // definitions by definition; both are exempt.
+            let is_control = node.ty == VType::Control;
+            let inp_control = g.nodes[inp.0 as usize].ty == VType::Control;
+            if !is_control && !inp_control {
+                if let NodeKind::Phi { .. } = node.kind {
+                    continue;
+                }
+                let b = node.block.0 as usize;
+                let ib = g.nodes[inp.0 as usize].block.0 as usize;
+                if !dominates(&doms, ib, b) {
+                    return Err(format!(
+                        "n{i}: input n{} in block {ib} does not dominate block {b}",
+                        inp.0
+                    ));
+                }
             }
         }
         if node.block.0 as usize >= g.blocks.len() {
@@ -1033,11 +1175,10 @@ pub fn verify(g: &Graph) -> Result<(), String> {
                     return Err(format!("n{i}: binary type must be Num or Bool"));
                 }
             }
-            NodeKind::If => {
-                if node.inputs.len() != 2 {
+            NodeKind::If
+                if node.inputs.len() != 2 => {
                     return Err(format!("n{i}: If must have control and condition"));
                 }
-            }
             _ => {}
         }
     }

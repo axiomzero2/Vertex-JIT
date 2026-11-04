@@ -1046,6 +1046,11 @@ impl TemplateLibrary {
             e.add_rsp(8);
             Template { code: e.as_slice().to_vec(), holes: vec![] }
         };
+        // Comparison collapses the operand pair in place (same discipline
+        // as sse_binop): the boolean result is written to the left slot and
+        // the stack pointer is adjusted by one slot. Pushing the result
+        // instead would leak 16 bytes per execution and overflow the machine
+        // stack inside loops (regression matrix tests/stack_discipline.rs).
         let compare = |cc: Cc| {
             let mut e = Emitter::new();
             e.movsd_xmm_rsp(0, 8);
@@ -1053,7 +1058,8 @@ impl TemplateLibrary {
             e.comisd(0, 1);
             e.setcc(cc, 0);
             e.movzx(0, 0);
-            e.push_r(0);
+            e.mov_rsp_r(8, 0);
+            e.add_rsp(8);
             Template { code: e.as_slice().to_vec(), holes: vec![] }
         };
         // DIV: zero guard + unordered handling + NaN canonicalization
@@ -1111,7 +1117,8 @@ impl TemplateLibrary {
             e.setcc(Cc::Np, 1);
             e.emit(&[0x20, 0xC8]);
             e.movzx(0, 0);
-            e.push_r(0);
+            e.mov_rsp_r(8, 0);
+            e.add_rsp(8);
             Template { code: e.as_slice().to_vec(), holes: vec![] }
         };
         let load_var = {
@@ -1328,16 +1335,51 @@ pub fn compile(
     }
     // Depth-aware halt tail: the interpreter's Halt returns the bottom of
     // the value stack (legacy parity). The static depth and lattice type
-    // at the Halt pc come from a linear simulation.
+    // at the Halt pc come from a linear simulation that tracks per-slot
+    // lattice types exactly like check_legality's initial state; a bool
+    // slot loaded after a loop must return a bool, not a mis-decoded word.
     let mut depth: i32 = 0;
     let mut depth_at_halt: i32 = 0;
     let mut stack_lats: Vec<Lat> = Vec::new();
+    let mut slot_lat: Vec<Lat> = vec![Lat::Num; func.locals.len()];
     let mut return_lat = Lat::Num;
-    for insn in &func.code {
+    // The walk is linear, but an unconditional Jump makes every instruction
+    // up to its target dead: simulating them would double-count pushes and
+    // the halt tail would read the wrong slot. Skip to the target; backward
+    // jumps resume linearly, which is exact because check_legality enforces
+    // equal stack states at every merge point.
+    let mut dead_until: usize = usize::MAX;
+    for (pc, insn) in func.code.iter().enumerate() {
+        if dead_until != usize::MAX {
+            if pc < dead_until {
+                continue;
+            }
+            dead_until = usize::MAX;
+        }
         match insn.op {
-            Opcode::PushNumber | Opcode::PushBool | Opcode::LoadVar => {
+            Opcode::PushNumber => {
                 depth += 1;
                 stack_lats.push(Lat::Num);
+            }
+            Opcode::PushBool => {
+                depth += 1;
+                stack_lats.push(Lat::Bool);
+            }
+            Opcode::LoadVar => {
+                depth += 1;
+                let lat = match insn.operand {
+                    Operand::Slot(s) => slot_lat.get(s as usize).copied().unwrap_or(Lat::Num),
+                    _ => Lat::Num,
+                };
+                stack_lats.push(lat);
+            }
+            Opcode::StoreVar | Opcode::AssignVar => {
+                depth -= 1;
+                let v = stack_lats.pop().unwrap_or(Lat::Num);
+                if let Operand::Slot(s) = insn.operand
+                    && let Some(sl) = slot_lat.get_mut(s as usize) {
+                        *sl = v;
+                    }
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Modulo => {
                 depth -= 1;
@@ -1351,10 +1393,21 @@ pub fn compile(
                 let _ = stack_lats.pop();
                 stack_lats.push(Lat::Bool);
             }
-            Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::StoreVar | Opcode::AssignVar
-            | Opcode::Drop => {
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
                 depth -= 1;
                 let _ = stack_lats.pop();
+            }
+            // Drop(slot) retires a variable binding only; it never touches
+            // the value stack (interp.rs and check_legality agree). The
+            // depth simulation must match the machine template, which emits
+            // no stack adjustment, or the halt tail reads the wrong slot.
+            Opcode::Jump => {
+                if let Operand::Target(t) = insn.operand {
+                    let t = t as usize;
+                    if t > pc + 1 {
+                        dead_until = t;
+                    }
+                }
             }
             Opcode::Halt => {
                 depth_at_halt = depth;
@@ -1375,7 +1428,7 @@ pub fn compile(
         }
         tail.emit(&[0x31, 0xD2]);
         tail.epilogue();
-        bytes.extend_from_slice(&tail.as_slice());
+        bytes.extend_from_slice(tail.as_slice());
     }
     Ok(T0Code {
         bytes,
@@ -1539,5 +1592,74 @@ mod tests {
         }
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("addsd"), "objdump should decode addsd; got: {text}");
+    }
+
+    /// The comparison templates must collapse the operand pair in place:
+    /// the boolean result is written to the left slot and the stack pointer
+    /// moves up one slot. Pushing the result instead leaves both operand
+    /// slots on the machine stack and leaks 16 bytes per execution; inside
+    /// a loop that is a stack overflow (tests/stack_discipline.rs matrix A).
+    #[test]
+    fn golden_compare_templates_collapse_operand_pair() {
+        let lib = TemplateLibrary::new(0x1000, 0x2000);
+        for (t, setcc) in [(&lib.less_than, 0x92u8), (&lib.greater_than, 0x97u8)] {
+            assert_eq!(
+                t.code,
+                &[
+                    0xF2, 0x0F, 0x10, 0x44, 0x24, 0x08, // movsd xmm0,[rsp+8]  (left)
+                    0xF2, 0x0F, 0x10, 0x4C, 0x24, 0x00, // movsd xmm1,[rsp]    (right)
+                    0x66, 0x0F, 0x2F, 0xC1, // comisd xmm0, xmm1
+                    0x0F, setcc, 0xC0, // set<cc> al  (92=b, 97=a)
+                    0x48, 0x0F, 0xB6, 0xC0, // movzx rax, al
+                    0x48, 0x89, 0x44, 0x24, 0x08, // mov [rsp+8], rax
+                    0x48, 0x81, 0xC4, 0x08, 0x00, 0x00, 0x00, // add rsp, 8
+                ][..]
+            );
+        }
+        assert_eq!(
+            lib.equal.code,
+            &[
+                0xF2, 0x0F, 0x10, 0x44, 0x24, 0x08, // movsd xmm0,[rsp+8]
+                0xF2, 0x0F, 0x10, 0x4C, 0x24, 0x00, // movsd xmm1,[rsp]
+                0x66, 0x0F, 0x2F, 0xC1, // comisd xmm0, xmm1
+                0x0F, 0x94, 0xC0, // sete al
+                0x0F, 0x9B, 0xC1, // setnp cl
+                0x20, 0xC8, // and al, cl
+                0x48, 0x0F, 0xB6, 0xC0, // movzx rax, al
+                0x48, 0x89, 0x44, 0x24, 0x08, // mov [rsp+8], rax
+                0x48, 0x81, 0xC4, 0x08, 0x00, 0x00, 0x00, // add rsp, 8
+            ][..]
+        );
+    }
+
+    /// The T0 depth simulation must treat Drop as a no-op on the value
+    /// stack: the machine template emits no stack adjustment, the
+    /// interpreter pops a binding, not a value, and check_legality agrees.
+    /// A Drop-shaped program therefore returns the bottom of the value
+    /// stack, not a zeroed rax.
+    #[test]
+    fn drop_does_not_pop_value_stack_in_halt_depth() {
+        use crate::cold::bytecode::{Function, Insn, Operand, Opcode as Op};
+        let f = Function {
+            name: "dropdepth".to_owned(),
+            locals: vec!["i".to_owned()],
+            strings: Vec::new(),
+            code: vec![
+                Insn { op: Op::PushNumber, operand: Operand::F64(5.0) },
+                Insn { op: Op::StoreVar, operand: Operand::Slot(0) },
+                Insn { op: Op::PushNumber, operand: Operand::F64(7.0) },
+                Insn { op: Op::Drop, operand: Operand::Slot(0) },
+                Insn { op: Op::Halt, operand: Operand::None },
+            ],
+        };
+        let lib = TemplateLibrary::new(0x1000, 0x2000);
+        let c = compile(&f, &lib).expect("compile");
+        // depth 1 at Halt: the tail reads [rsp] and ends in the epilogue
+        // (mov rax,[rsp] ; xor edx,edx ; mov rsp,rbp ; pop rbp ; ret).
+        assert_eq!(
+            &c.bytes[c.bytes.len() - 12..],
+            &[0x48, 0x8B, 0x44, 0x24, 0x00, 0x31, 0xD2, 0x48, 0x89, 0xEC, 0x5D, 0xC3][..],
+            "halt tail must load [rsp+0], not zero rax"
+        );
     }
 }

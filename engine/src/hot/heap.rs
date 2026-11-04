@@ -489,7 +489,7 @@ impl Drop for Heap {
 /// # Errors
 /// IndexOutOfBounds.
 fn index_of(idx: f64, len: u64) -> Result<usize, EngineError> {
-    if !(idx >= 0.0) || idx.fract() != 0.0 || idx >= len as f64 {
+    if idx < 0.0 || idx.fract() != 0.0 || idx >= len as f64 {
         return Err(EngineError::IndexOutOfBounds(idx));
     }
     Ok(idx as usize)

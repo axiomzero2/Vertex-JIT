@@ -1,0 +1,231 @@
+{
+  "standard": {
+    "version": "0.3",
+    "document": "standard.md"
+  },
+  "fail_on": [
+    0,
+    1
+  ],
+  "rules": {
+    "CEP-LINT-FILE-HEADER": {
+      "severity": 1,
+      "check": "comment_block_schema",
+      "mode": "file_header",
+      "max_start_line": 20,
+      "required_fields": [
+        "CEP:FILE",
+        "CEP:WHAT",
+        "CEP:WHY",
+        "CEP:CLASS",
+        "CEP:STATUS",
+        "CEP:FAILURE",
+        "CEP:ASSUMES",
+        "CEP:COST",
+        "CEP:EVIDENCE"
+      ],
+      "class_field": "CEP:CLASS",
+      "allowed_classes": [
+        "CEP-0",
+        "CEP-1",
+        "CEP-2",
+        "CC",
+        "FFI",
+        "HPC-0",
+        "HPC-1",
+        "HPC-2",
+        "RCS-0",
+        "RCS-1",
+        "RCS-2"
+      ]
+    },
+    "CEP-LINT-FUNC-BLOCK": {
+      "severity": 1,
+      "check": "function_policy",
+      "mode": "block",
+      "required_fields": [
+        "CEP:WHAT",
+        "CEP:WHY",
+        "CEP:STATUS",
+        "CEP:FAILURE",
+        "CEP:ASSUMES",
+        "CEP:COST",
+        "CEP:EVIDENCE"
+      ],
+      "min_body_statements": 2,
+      "gap_pattern": "^\\s*(template\\s*<|\\[\\[|inline\\s|explicit\\s|virtual\\s|static\\s|constexpr\\s|consteval\\s|constinit\\s|extern\\s|friend\\s|using\\s|\\}\\s*;?\\s*$|[A-Za-z_][A-Za-z0-9_:<>,\\s*&~]*\\))",
+      "require_block_for_lambdas": false
+    },
+    "CEP-LINT-STATUS-VALUE": {
+      "severity": 2,
+      "check": "comment_block_schema",
+      "mode": "status_value",
+      "status_field": "CEP:STATUS",
+      "allowed_values": [
+        "complete",
+        "partial",
+        "stub",
+        "placeholder"
+      ]
+    },
+    "CEP-LINT-TODO-OWNER": {
+      "severity": 1,
+      "check": "comment_regex",
+      "pattern": "\\b(TODO|FIXME|XXX|HACK)\\b",
+      "icase": true,
+      "suppression_pattern": "CEP:TODO\\([^)]*\\):\\s*CEP-[A-Za-z0-9_-]+\\s*:"
+    },
+    "CEP-LINT-STUB-DECL": {
+      "severity": 1,
+      "check": "comment_block_schema",
+      "mode": "stub_requirements",
+      "status_field": "CEP:STATUS",
+      "statuses": [
+        "stub",
+        "partial",
+        "placeholder"
+      ],
+      "required_fields": [
+        "CEP:OWNER",
+        "CEP:TICKET"
+      ]
+    },
+    "CEP-LINT-PLACEHOLDER-COMMENT": {
+      "severity": 1,
+      "check": "comment_regex",
+      "pattern": "\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\b",
+      "icase": true,
+      "suppression_pattern": "CEP:[A-Z-]+:"
+    },
+    "CEP-LINT-PLACEHOLDER-TEXT": {
+      "severity": 1,
+      "check": "string_literal_regex",
+      "pattern": "\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\b",
+      "icase": true
+    },
+    "CEP-LINT-MAGIC-NUMBER": {
+      "severity": 2,
+      "check": "numeric_literal_policy",
+      "allowed_values": [
+        "0",
+        "1"
+      ],
+      "exempt_contexts": "\\b(constexpr|const\\s+[A-Za-z_]|enum|static_assert|#)",
+      "context_window": 12
+    },
+    "CEP-LINT-MACRO-PREFIX": {
+      "severity": 2,
+      "check": "macro_prefix_policy",
+      "name_pattern": "CEP_[A-Z0-9_]+",
+      "guard_pattern": "[A-Z0-9_]+(_HPP|_H|_INCLUDED)"
+    },
+    "CEP-LINT-HOT-BANNED": {
+      "severity": 0,
+      "check": "banned_token_policy",
+      "applies_to_classes": [
+        "CEP-0",
+        "HPC-0",
+        "RCS-0"
+      ],
+      "class_field": "CEP:CLASS",
+      "tokens": [
+        "new",
+        "delete",
+        "throw",
+        "try",
+        "catch",
+        "dynamic_cast",
+        "typeid",
+        "virtual",
+        "co_await",
+        "co_yield",
+        "co_return",
+        "std::function",
+        "std::any",
+        "std::shared_ptr",
+        "std::weak_ptr",
+        "std::bind",
+        "std::regex",
+        "std::format",
+        "std::print",
+        "std::println",
+        "std::cout",
+        "std::cerr",
+        "std::clog",
+        "std::istream",
+        "std::ostream",
+        "std::filesystem",
+        "std::mutex",
+        "std::thread",
+        "std::async",
+        "std::sort",
+        "std::stable_sort",
+        "std::vector",
+        "std::string",
+        "std::list",
+        "std::map",
+        "std::set",
+        "std::unordered_map",
+        "std::unordered_set",
+        "malloc",
+        "calloc",
+        "realloc",
+        "free",
+        "fopen",
+        "fprintf"
+      ]
+    },
+    "CEP-LINT-STUB-BODY": {
+      "severity": 1,
+      "check": "function_policy",
+      "mode": "stub_body",
+      "suppress_status_field": "CEP:STATUS",
+      "suppress_statuses": [
+        "stub",
+        "partial",
+        "placeholder"
+      ]
+    },
+    "CEP-LINT-EMPTY-CATCH": {
+      "severity": 1,
+      "check": "flat_code_regex",
+      "pattern": "\\bcatch\\s*\\([^)]*\\)\\s*\\{\\s*\\}"
+    },
+    "CEP-LINT-EMPTY-BRANCH": {
+      "severity": 2,
+      "check": "flat_code_regex",
+      "pattern": "\\b(if|else|for|while|do|switch|try)\\b[^;{}]*\\{\\s*\\}"
+    },
+    "CEP-LINT-CONSTANT-RETURN": {
+      "severity": 2,
+      "check": "function_policy",
+      "mode": "constant_return",
+      "pattern": "\\breturn\\s+(true|false|nullptr)\\s*;"
+    },
+    "CEP-LINT-NAMING-TYPE": {
+      "severity": 2,
+      "check": "flat_code_regex",
+      "pattern": "\\b((struct|class|enum\\s+class|enum\\s+struct|enum)\\s+(\\w+_\\w*|[a-z]\\w*)\\b|using\\s+(\\w+_\\w*|[a-z]\\w*)\\s*=)",
+      "line_group": "2"
+    },
+    "CEP-LINT-NAMING-FUNC": {
+      "severity": 2,
+      "check": "function_policy",
+      "mode": "naming",
+      "name_pattern": "[a-z][a-z0-9_]*"
+    },
+    "CEP-LINT-COMMENTED-CODE": {
+      "severity": 2,
+      "check": "comment_regex",
+      "pattern": "^\\s*(//|/\\*)?\\s*(if|for|while|return|else|auto|int|void|const|struct|class)\\b[^\\n]*[;{}]\\s*$",
+      "suppression_pattern": "CEP:[A-Z-]+:"
+    },
+    "CEP-LINT-DOC-SYNC": {
+      "severity": 1,
+      "check": "doc_rule_coverage",
+      "doc_path": "standard.md",
+      "heading_pattern": "###\\s+Rule\\s+(CEP-LINT-[A-Za-z0-9-]+)",
+      "version_pattern": "Version:\\s*\\*\\*([0-9][0-9.]*)\\*\\*"
+    }
+  }
+}
