@@ -18,7 +18,7 @@ A program is a function `Function { name, code, locals, strings }` where
 The jump-target convention is instruction-index based: `Target(t)` refers to
 `code[t]`, and the verifier rejects `t >= code.len()`. This is the legacy
 convention and differs from byte offsets; the regression assembler in
-`tests/stack_discipline.rs` mirrors it.
+`tests/stack_discipline/` mirrors it.
 
 Opcode values are normative and pinned by compile-time assertions in
 `bytecode.rs` (Law 3: enforced, not commented). The T0 subset accepted by

@@ -1,33 +1,29 @@
 // CEP:FILE: engine/src/hot/heap.rs
-// CEP:WHAT: The generational garbage-collected heap: young and old arenas
-//           with object-start bitmaps, array allocation fast paths,
-//           bounds-checked element access, card-table write barriers and
-//           SATB enqueueing for concurrent marking.
-// CEP:WHY: Spec section 7: generational collector (7.1), card-table write
-//          barriers (7.3), SATB protection for concurrent marking, JIT
-//          barrier integration (7.5). The fast paths are called from
-//          generated machine code, so they are CEP-0.
+// CEP:WHAT: The garbage-collected heap facade: young and old arena
+//           construction, array allocation fast path, bounds-checked
+//           element access and the card-table write barrier.
+// CEP:WHY: Spec section 7: allocation fast paths and JIT barrier
+//          integration (7.5) are called from generated machine code
+//          (doc/gc.md); collection primitives live in heap_collect.rs,
+//          arena mechanics in arena.rs.
 // CEP:CLASS: CEP-0
 // CEP:STATUS: complete
 // CEP:FAILURE: alloc_array returns Err(GcNeeded) when the young arena is
 //              full (caller collects and retries) and Err(OutOfMemory) for
 //              old-arena exhaustion or size overflow; load_word/store_word
 //              return IndexOutOfBounds or TypeMismatch. No panics.
-// CEP:ASSUMES: single mutator (doc/gc.md Invariants); object pointers fit
-//              47 bits (asserted at arena mapping); Linux mmap.
-// CEP:COST: bump allocation is one compare, one add and size/8 stores;
-//           the store barrier is one predictable flag load plus one range
-//           compare; measured in benches/EVIDENCE.md.
-// CEP:EVIDENCE: benches/engine_bench.rs; tests/gc_tests.rs.
-// CEP:OPTIMAL: target-optimal for the allocation and barrier fast paths
-// CEP:OPTPROOF: bump allocation performs the minimum possible work (one
-//               add plus mandatory zero-initialization stores); the barrier
-//               is one load and one compare before the store.
+// CEP:ASSUMES: Linux mmap; 8-byte slots; single-mutator (doc/gc.md);
+//              object headers are written only by alloc_array.
+// CEP:COST: alloc_array is bump or free-list plus header stores (bitmap
+//           add plus mandatory zero-initialization stores); the barrier
+//           is one load and one compare before the store.
+// CEP:EVIDENCE: tests/gc_tests.rs; differential suite; sanitizer runs.
 // CEP:SECURITY: array indices are bounds-checked on every access; values
 //               are untrusted words and never executed; pointers are
 //               range-checked against arena bounds before dereference.
 
 use crate::cold::errors::EngineError;
+use crate::hot::arena::{Arena, GcStats};
 use crate::hot::value::{box_itag, is_box, Word, ITAG_OBJ};
 
 /// Object type tag for arrays.
@@ -40,44 +36,16 @@ pub const HUMONGOUS_BYTES: usize = 64 * 1024;
 /// Card size for the generational remembered set (spec 7.3).
 pub const CARD_BYTES: usize = 512;
 
-/// One arena backing a generation.
-pub struct Arena {
-    base: *mut u8,
-    len: usize,
-    /// Young only: next free offset in the virgin region.
-    bump: usize,
-    /// Free list of (offset, size) runs sorted by offset.
-    free: Vec<(u32, u32)>,
-    /// Object-start bitmap: one bit per 8-byte slot. The walk iterates the
-    /// bitmap, so free-list splitting cannot break the header chain.
-    starts: Box<[u64]>,
-}
-
-// SAFETY: the raw pointer is dereferenced only through &mut Heap methods;
-// Heap is single-mutator (doc/gc.md).
-unsafe impl Send for Arena {}
-
-/// Collection statistics.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GcStats {
-    /// Young collections performed.
-    pub young_collections: u64,
-    /// Old mark cycles started.
-    pub old_marks: u64,
-    /// Bytes allocated since start.
-    pub allocated_bytes: u64,
-    /// Bytes reclaimed by young collections.
-    pub young_reclaimed_bytes: u64,
-    /// Bytes reclaimed by old collections.
-    pub old_reclaimed_bytes: u64,
+unsafe extern "C" {
+    fn munmap(addr: *mut u8, len: usize) -> i32;
 }
 
 /// The garbage-collected heap.
 pub struct Heap {
-    young: Arena,
-    old: Arena,
+    pub(crate) young: Arena,
+    pub(crate) old: Arena,
     /// Card table over the old arena (spec 7.3).
-    cards: Box<[u8]>,
+    pub(crate) cards: Box<[u8]>,
     /// True while concurrent marking is in progress (SATB barriers live).
     pub marking: bool,
     /// SATB queue: pre-values of reference stores during marking.
@@ -85,15 +53,6 @@ pub struct Heap {
     /// Documented counters.
     pub stats: GcStats,
 }
-
-unsafe extern "C" {
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn munmap(addr: *mut u8, len: usize) -> i32;
-}
-
-const PROT_READ_WRITE: i32 = 0x3;
-const MAP_PRIVATE_ANON: i32 = 0x22;
-const MAP_FAILED: isize = -1;
 
 impl Heap {
     /// Create a heap with the given generation sizes.
@@ -285,180 +244,19 @@ impl Heap {
         self.young.contains(ptr)
     }
 
-    /// Clear every mark bit.
-    ///
-    /// CEP:WHAT: Mark reset.
-    /// CEP:WHY: Collections start clean.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: no collection in progress.
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    pub fn clear_marks(&mut self) {
-        self.young.clear_marks();
-        self.old.clear_marks();
-    }
-
-    /// Set the mark bit of one object.
-    ///
-    /// CEP:WHAT: Mark set.
-    /// CEP:WHY: The marker worklist.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none for engine-owned pointers.
-    /// CEP:ASSUMES: ptr is an object base.
-    /// CEP:COST: one load, one store.
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    pub fn set_mark(&mut self, ptr: usize) {
-        unsafe {
-            *(ptr as *mut u64) |= 1u64 << 40;
-        }
-    }
-
-    /// Read the mark bit of one object.
-    ///
-    /// CEP:WHAT: Mark read.
-    /// CEP:WHY: Worklist dedup.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none for engine-owned pointers.
-    /// CEP:ASSUMES: ptr is an object base.
-    /// CEP:COST: one load, one shift.
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    #[must_use]
-    pub fn marked(&self, ptr: usize) -> bool {
-        (unsafe { *(ptr as *const u64) } >> 40) & 1 == 1
-    }
-
-    /// Increment the survivor age of one object.
-    ///
-    /// CEP:WHAT: Aging.
-    /// CEP:WHY: Generational hypothesis accounting (spec 7.1).
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: saturates at 255 by design.
-    /// CEP:ASSUMES: ptr is an object base.
-    /// CEP:COST: one load, one store.
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    pub fn age_object(&mut self, ptr: usize) {
-        let h = unsafe { &mut *(ptr as *mut u64) };
-        let age = (*h >> 44) & 0xFF;
-        if age < 0xFF {
-            *h = (*h & !(0xFFu64 << 44)) | ((age + 1) << 44);
-        }
-    }
-
-    /// Sweep the young arena into its free list; returns reclaimed bytes.
-    ///
-    /// CEP:WHAT: Young mark-region sweep.
-    /// CEP:WHY: Non-moving design: survivors keep addresses, so
-    ///          conservative machine-stack roots stay valid (doc/gc.md).
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: mark phase completed.
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    pub fn sweep_young(&mut self) -> u64 {
-        let freed = self.young.sweep();
-        self.stats.young_reclaimed_bytes += freed;
-        self.stats.young_collections += 1;
-        freed
-    }
-
-    /// Sweep the old arena; returns reclaimed bytes.
-    ///
-    /// CEP:WHAT: Old sweep.
-    /// CEP:WHY: Old reclamation; cards reset for the next cycle.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: mark completed; no mutation during sweep.
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    pub fn sweep_old(&mut self) -> u64 {
-        let freed = self.old.sweep();
-        self.stats.old_reclaimed_bytes += freed;
-        self.cards.fill(0);
-        freed
-    }
-
-    /// Live (marked) bytes in a generation.
-    ///
-    /// CEP:WHAT: Occupancy query.
-    /// CEP:WHY: Collection triggers.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: none
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    #[must_use]
-    pub fn marked_bytes(&self, old: bool) -> u64 {
-        if old {
-            self.old.marked_bytes()
-        } else {
-            self.young.marked_bytes()
-        }
-    }
-
-    /// Capacity of a generation in bytes.
-    ///
-    /// CEP:WHAT: Capacity query.
-    /// CEP:WHY: Occupancy ratios.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: none
-    /// CEP:COST: O(1).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    #[must_use]
-    pub fn capacity_bytes(&self, old: bool) -> usize {
-        if old { self.old.len } else { self.young.len }
-    }
-
-    /// Walk every object in a generation: (ptr, header, size).
-    ///
-    /// CEP:WHAT: Object walk.
-    /// CEP:WHY: Marking and root scanning.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: headers written only by alloc_array.
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    pub fn for_each_object(&self, old: bool, f: &mut dyn FnMut(usize, u64, usize)) {
-        if old {
-            self.old.walk(f);
-        } else {
-            self.young.walk(f);
-        }
-    }
-
-    /// Filter a word into an object pointer inside the arenas.
-    ///
-    /// CEP:WHAT: Root word filter.
-    /// CEP:WHY: Precise root scanning trusts only in-arena object words.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: non-root words yield None.
-    /// CEP:ASSUMES: spans contain engine values.
-    /// CEP:COST: two compares per word.
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: foreign words are ignored, never dereferenced.
-    #[must_use]
-    pub fn root_ptr_of(&self, w: u64) -> Option<usize> {
-        if is_box(w) && box_itag(w) == ITAG_OBJ {
-            let p = (w & crate::hot::value::PAYLOAD_MASK) as usize;
-            if self.in_young(p) || self.in_old(p) {
-                return Some(p);
-            }
-        }
-        None
-    }
 }
 
 impl Drop for Heap {
+    /// Release both arena mappings.
+/// CEP:WHAT: Arena teardown at engine drop.
+/// CEP:WHY: No heap mappings may outlive the engine
+///              (section 25.2 resource rule).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: munmap results ignored; cannot fail for valid
+///              engine-owned mappings.
+/// CEP:ASSUMES: no concurrent access (single-mutator).
+/// CEP:COST: two syscalls.
+/// CEP:EVIDENCE: sanitizer runs in CI.
     fn drop(&mut self) {
         // CEP:UNSAFE: munmap of engine-owned anonymous mappings.
         // CEP:WHAT: Arena teardown.
@@ -493,225 +291,4 @@ fn index_of(idx: f64, len: u64) -> Result<usize, EngineError> {
         return Err(EngineError::IndexOutOfBounds(idx));
     }
     Ok(idx as usize)
-}
-
-impl Arena {
-    /// Map an anonymous arena.
-    ///
-    /// CEP:WHAT: Arena construction.
-    /// CEP:WHY: Generations need dedicated address ranges.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: OutOfMemory on mmap failure.
-    /// CEP:ASSUMES: Linux mmap.
-    /// CEP:COST: one syscall.
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: private anonymous mapping.
-    ///
-    /// # Errors
-    /// OutOfMemory.
-    fn map(len: usize) -> Result<Arena, EngineError> {
-        // CEP:UNSAFE: mmap of an anonymous private heap arena.
-        // CEP:WHAT: Arena mapping.
-        // CEP:WHY: Dedicated ranges enable two-compare generation checks.
-        // CEP:FAILURE: MAP_FAILED surfaces as OutOfMemory.
-        // CEP:ASSUMES: Linux page granularity.
-        // CEP:COST: one syscall.
-        // CEP:EVIDENCE: tests/gc_tests.rs.
-        // CEP:SECURITY: private, anonymous, non-executable.
-        let base = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ_WRITE, MAP_PRIVATE_ANON, -1, 0) };
-        if base as isize == MAP_FAILED {
-            return Err(EngineError::OutOfMemory);
-        }
-        let bits = len.div_ceil(8).div_ceil(64);
-        Ok(Arena {
-            base,
-            len,
-            bump: 0,
-            free: Vec::new(),
-            starts: vec![0u64; bits].into_boxed_slice(),
-        })
-    }
-
-    /// True when the address is inside this arena.
-    ///
-    /// CEP:WHAT: Range membership.
-    /// CEP:WHY: Barriers and root filtering.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: none
-    /// CEP:COST: two compares.
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:OPTIMAL: target-optimal
-    /// CEP:OPTPROOF: two compares.
-    /// CEP:SECURITY: none
-    fn contains(&self, ptr: usize) -> bool {
-        let b = self.base as usize;
-        ptr >= b && ptr < b + self.len
-    }
-
-    /// Allocate `size` bytes (8-aligned).
-    ///
-    /// CEP:WHAT: First-fit allocation with bump fast path.
-    /// CEP:WHY: Young allocations bump first; post-GC allocations use the
-    ///          free list (non-moving design).
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: Err(GcNeeded) when no space fits.
-    /// CEP:ASSUMES: size 8-aligned.
-    /// CEP:COST: bump O(1); free list O(runs).
-    /// CEP:EVIDENCE: benches.
-    /// CEP:SECURITY: size checked against the arena.
-    fn alloc(&mut self, size: usize) -> Result<usize, EngineError> {
-        if !self.free.is_empty() {
-            for i in 0..self.free.len() {
-                let (off, sz) = self.free[i];
-                if sz as usize >= size {
-                    let addr = self.base as usize + off as usize;
-                    if sz as usize == size {
-                        self.free.remove(i);
-                    } else {
-                        self.free[i] = (off + size as u32, sz - size as u32);
-                    }
-                    self.set_start(off as usize);
-                    return Ok(addr);
-                }
-            }
-        }
-        if self.bump + size <= self.len {
-            let addr = self.base as usize + self.bump;
-            self.set_start(self.bump);
-            self.bump += size;
-            return Ok(addr);
-        }
-        Err(EngineError::GcNeeded)
-    }
-
-    #[inline]
-    fn set_start(&mut self, off: usize) {
-        let bit = off / 8;
-        self.starts[bit / 64] |= 1u64 << (bit % 64);
-    }
-
-    #[inline]
-    fn clear_start(&mut self, off: usize) {
-        let bit = off / 8;
-        self.starts[bit / 64] &= !(1u64 << (bit % 64));
-    }
-
-    /// Walk every object: (ptr, header, size).
-    ///
-    /// CEP:WHAT: Bitmap-driven object walk.
-    /// CEP:WHY: Marking, marking reset and occupancy queries.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: headers written only by alloc_array.
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    fn walk(&self, f: &mut dyn FnMut(usize, u64, usize)) {
-        for (wi, &word) in self.starts.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let off = (wi * 64 + bit) * 8;
-                if off + HEADER_BYTES > self.bump {
-                    continue;
-                }
-                let p = self.base as usize + off;
-                let h = unsafe { *(p as *const u64) };
-                f(p, h, (h & 0xFFFF_FFFF) as usize);
-            }
-        }
-    }
-
-    /// Clear all mark bits.
-    ///
-    /// CEP:WHAT: Mark reset.
-    /// CEP:WHY: Collection start state.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: none
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    fn clear_marks(&mut self) {
-        let starts = self.starts.clone();
-        for (wi, &word) in starts.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let off = (wi * 64 + bit) * 8;
-                if off + HEADER_BYTES > self.bump {
-                    continue;
-                }
-                let p = self.base as usize + off;
-                unsafe {
-                    *(p as *mut u64) &= !(1u64 << 40);
-                }
-            }
-        }
-    }
-
-    /// Sum of marked object sizes.
-    ///
-    /// CEP:WHAT: Live bytes.
-    /// CEP:WHY: Occupancy thresholds.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: none
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    fn marked_bytes(&self) -> u64 {
-        let mut total = 0u64;
-        self.walk(&mut |_, h, size| {
-            if (h >> 40) & 1 == 1 {
-                total += size as u64;
-            }
-        });
-        total
-    }
-
-    /// Sweep unmarked objects into the free list.
-    ///
-    /// CEP:WHAT: Mark-region sweep with run coalescing.
-    /// CEP:WHY: Non-moving reclamation.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: none
-    /// CEP:ASSUMES: mark completed; no concurrent mutation.
-    /// CEP:COST: O(objects).
-    /// CEP:EVIDENCE: tests/gc_tests.rs.
-    /// CEP:SECURITY: none
-    fn sweep(&mut self) -> u64 {
-        let mut free: Vec<(u32, u32)> = Vec::new();
-        let mut reclaimed = 0u64;
-        let starts = self.starts.clone();
-        for (wi, &word) in starts.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let off = (wi * 64 + bit) * 8;
-                if off + HEADER_BYTES > self.bump {
-                    continue;
-                }
-                let p = self.base as usize + off;
-                let h = unsafe { *(p as *const u64) };
-                if (h >> 40) & 1 == 0 {
-                    let size = (h & 0xFFFF_FFFF) as usize;
-                    reclaimed += size as u64;
-                    self.clear_start(off);
-                    match free.last_mut() {
-                        Some(last) if last.0 as usize + last.1 as usize == off => {
-                            last.1 += size as u32;
-                        }
-                        _ => free.push((off as u32, size as u32)),
-                    }
-                }
-            }
-        }
-        self.free = free;
-        reclaimed
-    }
 }

@@ -20,8 +20,8 @@
 #include "json.hpp"
 #include "lint.hpp"
 
-/// Tool version, pinned to the standard it enforces.
-constexpr const char* kToolVersion = "0.3.0";
+/// Tool version.
+constexpr const char* kToolVersion = "0.4.0";
 
 /// Default configuration path.
 constexpr const char* kDefaultConfig = ".cep/cep_lint.json";
@@ -29,8 +29,8 @@ constexpr const char* kDefaultConfig = ".cep/cep_lint.json";
 /// Self-test manifest path.
 constexpr const char* kManifestPath = "tools/cep_lint/tests/manifest.json";
 
-/// Recognized source extensions.
-constexpr const char* kExtensions[] = {".cpp", ".hpp", ".cc", ".hh"};
+/// Recognized source extensions (C++ plus the first-party Rust tree).
+constexpr const char* kExtensions[] = {".cpp", ".hpp", ".cc", ".hh", ".rs"};
 
 /// Minimum severity that fails a run by default.
 constexpr long kFailSeverity0 = 0;
@@ -77,6 +77,7 @@ auto main(int argc, char** argv) -> int {
         config_path = env;
     }
     bool self_test_mode = false;
+    bool version_requested = false;
     std::vector<std::string> targets;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -92,8 +93,7 @@ auto main(int argc, char** argv) -> int {
             usage();
             return kExitClean;
         } else if (a == "--version" || a == "-v") {
-            std::printf("cep_lint %s\n", kToolVersion);
-            return 0;
+            version_requested = true;
         } else if (!a.empty() && a[0] == '-' && a != "-") {
             std::fprintf(stderr, "CEP-LINT usage: unknown option\n");
             return kExitUsage;
@@ -107,6 +107,14 @@ auto main(int argc, char** argv) -> int {
     if (!cep::load_config(config_path, cfg, err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return kExitBootstrap;
+    }
+
+    if (version_requested) {
+        // 50.1: the banner carries the tool version and the standard
+        // version the loaded configuration pins.
+        std::printf("cep_lint %s\n", kToolVersion);
+        std::printf("standard CEP&CC %s\n", cfg.standard_version.c_str());
+        return kExitClean;
     }
 
     if (self_test_mode) {
@@ -130,13 +138,22 @@ auto main(int argc, char** argv) -> int {
         return 0;
     }
 
-    if (targets.empty()) {
-        std::fprintf(stderr, "CEP-LINT usage: no targets\n");
-        return kExitUsage;
-    }
-
     std::vector<std::string> files;
     const std::vector<std::string> exts(std::begin(kExtensions), std::end(kExtensions));
+    if (targets.empty()) {
+        // No-target scan mode: lint exactly the first-party set declared
+        // by file_globs (0.4 applicability). Fail closed when the
+        // configuration declares no globs or they match nothing.
+        if (cfg.file_globs.empty()) {
+            std::fprintf(stderr, "CEP-LINT usage: no targets and no file_globs\n");
+            return kExitUsage;
+        }
+        files = cep::collect_globs(cfg.file_globs, exts);
+        if (files.empty()) {
+            std::fprintf(stderr, "CEP-LINT-BOOT-1: file_globs matched no files\n");
+            return kExitBootstrap;
+        }
+    }
     for (const std::string& t : targets) {
         std::vector<std::string> part = cep::collect_files(t, exts);
         if (part.empty()) {
@@ -148,7 +165,6 @@ auto main(int argc, char** argv) -> int {
         }
     }
     std::sort(files.begin(), files.end());
-
     std::vector<cep::Finding> findings;
     for (const std::string& f : files) {
         if (!cep::lint_file(cfg, f, findings, err)) {

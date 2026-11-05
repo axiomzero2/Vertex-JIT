@@ -1,15 +1,12 @@
 // CEP:FILE: tools/cep_lint/tests/cases/stub_unowned.cpp
-// CEP:WHAT: Self-test case: an unowned stub block.
-// CEP:WHY: Exercises CEP-LINT-STUB-DECL.
+// CEP:WHAT: Stub without owner or ticket.
+// CEP:WHY: Self-test fixture.
 // CEP:CLASS: CEP-2
 // CEP:STATUS: complete
-// CEP:FAILURE: none
+// CEP:FAILURE: panics on divergence (test fixture).
 // CEP:ASSUMES: none
-// CEP:COST: offline.
-// CEP:EVIDENCE: this file.
-
-// CEP:WHAT: Not finished.
-// CEP:STATUS: stub
-auto unfinished() -> int {
-    return 0;
-}
+// CEP:COST: O(1).
+// CEP:EVIDENCE: the self-test manifest.
+int separator = 0;
+/// CEP:STATUS: stub
+int a = 0;

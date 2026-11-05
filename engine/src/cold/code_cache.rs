@@ -254,6 +254,17 @@ impl CodeCache {
 }
 
 impl Drop for CodeCache {
+    /// Release every region (sealed or free).
+/// CEP:WHAT: Code-cache teardown at engine drop.
+/// CEP:WHY: No executable mappings may outlive
+///              the engine (section 25.2 resource rule).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: munmap results ignored; cannot fail for valid
+///              engine-owned mappings.
+/// CEP:ASSUMES: no execution in flight (single-mutator).
+/// CEP:COST: one
+///              syscall per region.
+/// CEP:EVIDENCE: sanitizer runs in CI.
     fn drop(&mut self) {
         for r in self.regions.drain(..).chain(self.free.drain(..)) {
             // CEP:UNSAFE: munmap of engine-owned anonymous mappings.
@@ -300,6 +311,14 @@ fn set_prot(base: *mut u8, len: u32, prot: i32) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// CEP:WHAT: Round a size up to an alignment boundary.
+/// CEP:WHY: Region sizes must be page/alignment multiples before mmap
+///              (doc/code-cache.md).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: align is a power of two (debug-asserted).
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: region arithmetic in tests/code_cache tests.
 const fn round_up_to(v: u32, align: u32) -> u32 {
     debug_assert!(align.is_power_of_two());
     (v + align - 1) & !(align - 1)
@@ -322,6 +341,14 @@ mod tests {
     }
 
     /// Write and execute a `mov eax, 42; ret` stub through the cache.
+    /// CEP:WHAT: Generated code executes and the region seals after publish.
+/// CEP:WHY: W^X discipline (doc/code-cache.md): the region is writable during
+///              emit, executable after seal, never both.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: execution plus seal-state assertions inline.
     #[test]
     fn executes_generated_code_and_seals() {
         let t = target();
@@ -340,6 +367,14 @@ mod tests {
         cache.release(base);
     }
 
+    /// CEP:WHAT: The cache refuses growth past its budget.
+/// CEP:WHY: Fail-closed capacity: exceeding the budget is an error, never a
+///              silent remap.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: negative case asserted inline.
     #[test]
     fn budget_is_enforced() {
         let t = target();
@@ -350,6 +385,14 @@ mod tests {
         assert!(matches!(err, EngineError::CodeCacheFull { .. }));
     }
 
+    /// CEP:WHAT: Released regions return to the free set and are reused.
+/// CEP:WHY: Tier demotions release regions; the allocator must reuse them or
+///              the budget exhausts under OSR churn.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: release/realloc assertions inline.
     #[test]
     fn released_regions_are_reused() {
         let t = target();

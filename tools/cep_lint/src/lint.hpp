@@ -71,6 +71,9 @@ struct Config {
     std::string doc_path;
     /// Severities that fail the run.
     std::vector<long> fail_on;
+    /// First-party source globs (0.4 applicability); empty disables the
+    /// no-target scan mode.
+    std::vector<std::string> file_globs;
     /// Rules in document order.
     std::vector<Rule> rules;
 };
@@ -90,6 +93,12 @@ auto json_merge(const Json& base, const Json& overlay) -> Json;
 
 /// List files under a directory (sorted, recursive) or the file itself.
 [[nodiscard]] auto collect_files(const std::string& path, const std::vector<std::string>& exts)
+    -> std::vector<std::string>;
+
+/// Expand configuration file_globs from the working directory (sorted,
+/// deduplicated); `**` spans any number of directories, `*` one segment.
+[[nodiscard]] auto collect_globs(const std::vector<std::string>& globs,
+                                 const std::vector<std::string>& exts)
     -> std::vector<std::string>;
 
 /// Run every configured rule over one file; appends findings.

@@ -1,14 +1,16 @@
 // CEP:FILE: tools/cep_lint/src/reader.hpp
-// CEP:WHAT: Shared C++ reader: comment/string-aware lexing, function
+// CEP:WHAT: Shared C++/Rust reader: comment/string-aware lexing, function
 //           extraction and comment-block queries.
 // CEP:WHY: The check primitives all consume the same stripped view;
 //           line numbers must stay exact (findings carry them).
 // CEP:CLASS: CEP-2
 // CEP:STATUS: complete
 // CEP:FAILURE: Malformed sources lex as plain text; no failure path.
-// CEP:ASSUMES: UTF-8; raw strings R"del(...)del".
+// CEP:ASSUMES: UTF-8; raw strings R"del(...)del" (C++) and r#"..."# (Rust);
+//              the dialect is the file extension (0.4 applicability note).
 // CEP:COST: O(bytes) single pass.
-// CEP:EVIDENCE: self-test scenarios with nested strings and comments.
+// CEP:EVIDENCE: self-test scenarios with nested strings, comments and
+//               Rust lifetime/raw-string cases.
 // CEP:SECURITY: none
 #pragma once
 
@@ -33,8 +35,11 @@ struct SourceView {
     std::string declared_class;
 };
 
-/// Lex a C++ source into views; line numbers stay exact.
+/// Lex a C++ or Rust source into views; line numbers stay exact.
 auto lex_source(const std::string& path, const std::string& text, SourceView& out) -> void;
+
+/// True when the path names a Rust source file (dialect by extension).
+auto is_rust_path(const std::string& path) -> bool;
 
 /// True when the line holds no code (comment or blank).
 auto is_comment_or_blank(const SourceView& v, std::size_t idx) -> bool;

@@ -4,7 +4,7 @@
 
 The interpreter is the reference implementation. Every tier must match it
 bit-for-bit on the whole program corpus. `engine/tests/differential.rs`
-defines the harness; `engine/tests/stack_discipline.rs` defines the
+defines the harness; `engine/tests/stack_discipline/` defines the
 regression matrices required by standard 61.3 (fifty tests per confirmed
 defect class).
 

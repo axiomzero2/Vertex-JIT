@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 
 namespace cep {
@@ -94,6 +95,7 @@ auto config_from_json(const Json& j, const std::string& origin, Config& out, std
     if (out.fail_on.empty()) {
         out.fail_on = {kDefaultFailSeverity0, kDefaultFailSeverity1};
     }
+    out.file_globs = j.str_array("file_globs");
     const Json* rules = j.find("rules");
     if (rules == nullptr || !rules->is_object()) {
         err = "CEP-LINT-BOOT-4: missing key 'rules' in " + origin;
@@ -186,6 +188,126 @@ auto collect_files(const std::string& path, const std::vector<std::string>& exts
     }
     std::sort(all.begin(), all.end());
     out = all;
+    return out;
+}
+
+namespace {
+
+// CEP:WHAT: Translate one glob to an ECMAScript regex.
+// CEP:WHY: `**` spans any number of directories, `*` stays in one segment.
+// CEP:STATUS: complete
+// CEP:FAILURE: invalid patterns surface through compile_re upstream.
+// CEP:ASSUMES: '/' separators on every platform.
+// CEP:COST: O(pattern).
+// CEP:EVIDENCE: glob scenarios in the self-test manifest.
+auto glob_to_regex(const std::string& glob, std::string& out) -> void {
+    out.clear();
+    for (std::size_t i = 0; i < glob.size(); ++i) {
+        const char c = glob[i];
+        if (c == '*') {
+            const bool double_star = (i + 1 < glob.size()) && glob[i + 1] == '*';
+            if (double_star) {
+                ++i;
+                // Consume one following '/' so `a/**/b` also matches `a/b`.
+                if (i + 1 < glob.size() && glob[i + 1] == '/') {
+                    ++i;
+                    out += "(?:.*/)?";
+                } else {
+                    out += ".*";
+                }
+            } else {
+                out += "[^/]*";
+            }
+            continue;
+        }
+        if (c == '?') {
+            out += "[^/]";
+            continue;
+        }
+        if (std::string(".^$|()[]{}+\\").find(c) != std::string::npos) {
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+}
+
+// CEP:WHAT: Recursively list candidate files under the working directory.
+// CEP:WHY: Glob expansion needs relative paths; traversal must skip VCS
+//          and build trees for determinism and cost.
+// CEP:STATUS: complete
+// CEP:FAILURE: unreadable directories are skipped silently.
+// CEP:ASSUMES: the working directory is the repository root.
+// CEP:COST: O(entries under root).
+// CEP:EVIDENCE: the no-target scan gate in CI.
+auto walk_relative(const fs::path& dir, const std::string& prefix,
+                   std::vector<std::string>& out) -> void {
+    std::error_code ec;
+    for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+        const std::string name = e.path().filename().string();
+        if (name.rfind('.', 0) == 0 || name == "target" || name == "node_modules") {
+            continue;
+        }
+        const std::string rel = prefix.empty() ? name : prefix + "/" + name;
+        std::error_code ec2;
+        const bool dir_p = e.is_directory(ec2);
+        if (dir_p) {
+            walk_relative(e.path(), rel, out);
+        } else if (e.is_regular_file(ec2)) {
+            out.push_back(rel);
+        }
+    }
+}
+
+}  // namespace
+
+// CEP:WHAT: Expand configuration file_globs from the working directory.
+// CEP:WHY: The no-target scan mode lints exactly the declared first-party
+//          set (0.4 applicability note), deterministically sorted.
+// CEP:STATUS: complete
+// CEP:FAILURE: globs matching nothing yield an empty result; the caller
+//              fails closed with BOOT-1.
+// CEP:ASSUMES: the working directory is the repository root.
+// CEP:COST: O(entries x globs).
+// CEP:EVIDENCE: the no-target scan gate in CI.
+auto collect_globs(const std::vector<std::string>& globs,
+                   const std::vector<std::string>& exts) -> std::vector<std::string> {
+    std::vector<std::string> all;
+    walk_relative(".", "", all);
+    std::sort(all.begin(), all.end());
+    std::vector<std::string> out;
+    for (const std::string& g : globs) {
+        if (g.find('*') == std::string::npos && g.find('?') == std::string::npos) {
+            // Literal path: a file or a directory expanded by extension.
+            for (const std::string& f : collect_files(g, exts)) {
+                out.push_back(f);
+            }
+            continue;
+        }
+        std::string pat;
+        glob_to_regex(g, pat);
+        std::regex re;
+        try {
+            re.assign(pat);
+        } catch (const std::regex_error&) {
+            continue;
+        }
+        for (const std::string& rel : all) {
+            if (std::regex_match(rel, re)) {
+                bool ext_ok = exts.empty();
+                for (const std::string& ext : exts) {
+                    if (rel.size() >= ext.size()
+                        && rel.compare(rel.size() - ext.size(), ext.size(), ext) == 0) {
+                        ext_ok = true;
+                    }
+                }
+                if (ext_ok) {
+                    out.push_back(rel);
+                }
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
 }
 

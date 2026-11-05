@@ -96,6 +96,14 @@ impl Default for JitBudgets {
 mod tests {
     use super::*;
 
+    /// CEP:WHAT: Tier thresholds are strictly ordered.
+/// CEP:WHY: The promotion ladder (Interp<T0<T1<T2<T3 budgets) must be
+///              monotonic or tiering oscillates.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: threshold values asserted inline.
     #[test]
     fn tier_thresholds_ordering() {
         let t = TierThresholds::default();

@@ -500,7 +500,7 @@ pub fn lift(
     entry_ctrl[0] = Some(start);
     let mut env: Vec<NodeId> = vec![NodeId(u32::MAX); func.locals.len()];
 
-    macro_rules! budget_check {
+    macro_rules! CEP_BUDGET_CHECK {
         () => {
             if g.nodes.len() as u32 >= max_nodes {
                 return Err(LiftError::TooManyNodes);
@@ -526,7 +526,7 @@ pub fn lift(
         // Multi-pred merge: Region or Loop plus phis.
         let extra_edges = std::mem::take(&mut extra[bi]);
         if !extra_edges.is_empty() || loop_header[bi] {
-            budget_check!();
+            CEP_BUDGET_CHECK!();
             if !stack.is_empty() {
                 return Err(LiftError::UnbalancedStack);
             }
@@ -546,7 +546,7 @@ pub fn lift(
                 }
                 g.alloc(NodeKind::Region, inputs, BlockId(bi as u32), VType::Control)
             };
-            // Phis. For loop headers: a placeholder phi for every live
+            // Phis. For loop headers: a stand-in phi for every live
             // slot (the back-edge value arrives later via close_loop, which
             // patches inputs[1]); phi-simplify collapses the trivial ones.
             // For ordinary merges: pruned phis only where reaching
@@ -568,14 +568,14 @@ pub fn lift(
                     vals.push(e.env[s]);
                 }
                 let is_loop_live = loop_header[bi] && env[s].0 != u32::MAX;
-                // Loop phis carry a placeholder second input (the
+                // Loop phis carry a reserved second input (the
                 // back-edge); close_loop patches it.
                 if is_loop_live {
                     vals.push(env[s]);
                 }
                 let differs = vals.iter().any(|v| *v != vals[0]);
                 if is_loop_live || (!loop_header[bi] && differs) {
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     // A merge phi's type is its inputs' common type when
                     // they agree; a numeric default would mis-decode a
                     // boolean join at the halt tail (word 1 becomes a
@@ -626,7 +626,7 @@ pub fn lift(
                     let Operand::F64(f) = insn.operand else {
                         return Err(LiftError::StackUnderflow);
                     };
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::ConstNum(f), Vec::new(), BlockId(bi as u32), VType::Num);
                     stack.push(nid);
                 }
@@ -634,7 +634,7 @@ pub fn lift(
                     let Operand::U64(v) = insn.operand else {
                         return Err(LiftError::StackUnderflow);
                     };
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::ConstBool(v == 1), Vec::new(), BlockId(bi as u32), VType::Bool);
                     stack.push(nid);
                 }
@@ -642,7 +642,7 @@ pub fn lift(
                     let Operand::StrId(s) = insn.operand else {
                         return Err(LiftError::StackUnderflow);
                     };
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::ConstStr(s), Vec::new(), BlockId(bi as u32), VType::Str);
                     stack.push(nid);
                 }
@@ -677,17 +677,17 @@ pub fn lift(
                         Opcode::Equal => NodeKind::Eq,
                         Opcode::Div => {
                             // Guard: right == 0 -> uncommon trap (spec 5.7.2).
-                            budget_check!();
+                            CEP_BUDGET_CHECK!();
                             let zero = g.alloc(NodeKind::ConstNum(0.0), Vec::new(), BlockId(bi as u32), VType::Num);
-                            budget_check!();
+                            CEP_BUDGET_CHECK!();
                             let eq = g.alloc(NodeKind::Eq, vec![y, zero], BlockId(bi as u32), VType::Bool);
-                            budget_check!();
+                            CEP_BUDGET_CHECK!();
                             let ifn = g.alloc(NodeKind::If, vec![ctrl, eq], BlockId(bi as u32), VType::Control);
-                            budget_check!();
+                            CEP_BUDGET_CHECK!();
                             let t = g.alloc(NodeKind::IfTrue, vec![ifn], BlockId(bi as u32), VType::Control);
-                            budget_check!();
+                            CEP_BUDGET_CHECK!();
                             let f = g.alloc(NodeKind::IfFalse, vec![ifn], BlockId(bi as u32), VType::Control);
-                            budget_check!();
+                            CEP_BUDGET_CHECK!();
                             let trap = g.alloc(
                                 NodeKind::UncommonTrap { reason: DeoptReason::DivisionByZero },
                                 vec![t],
@@ -705,19 +705,19 @@ pub fn lift(
                     } else {
                         VType::Num
                     };
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(kind, vec![x, y], BlockId(bi as u32), ty);
                     stack.push(nid);
                 }
                 Opcode::NewArray => {
                     let len = stack.pop().ok_or(LiftError::StackUnderflow)?;
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::NewArray, vec![len], BlockId(bi as u32), VType::Obj);
                     stack.push(nid);
                 }
                 Opcode::ArrayLen => {
                     let arr = stack.pop().ok_or(LiftError::StackUnderflow)?;
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::ArrayLen, vec![arr], BlockId(bi as u32), VType::Num);
                     stack.push(nid);
                 }
@@ -725,23 +725,23 @@ pub fn lift(
                     let idx = stack.pop().ok_or(LiftError::StackUnderflow)?;
                     let arr = stack.pop().ok_or(LiftError::StackUnderflow)?;
                     // Guard: idx < 0 || idx >= len -> trap (spec 5.7.2).
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let len = g.alloc(NodeKind::ArrayLen, vec![arr], BlockId(bi as u32), VType::Num);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let zero = g.alloc(NodeKind::ConstNum(0.0), Vec::new(), BlockId(bi as u32), VType::Num);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let neg = g.alloc(NodeKind::Lt, vec![idx, zero], BlockId(bi as u32), VType::Bool);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let ge = g.alloc(NodeKind::Gt, vec![idx, len], BlockId(bi as u32), VType::Bool);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let bad = g.alloc(NodeKind::Or, vec![neg, ge], BlockId(bi as u32), VType::Bool);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let ifn = g.alloc(NodeKind::If, vec![ctrl, bad], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let t = g.alloc(NodeKind::IfTrue, vec![ifn], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let f = g.alloc(NodeKind::IfFalse, vec![ifn], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let trap = g.alloc(
                         NodeKind::UncommonTrap { reason: DeoptReason::BoundsCheck },
                         vec![t],
@@ -749,7 +749,7 @@ pub fn lift(
                         VType::Control,
                     );
                     record_site(&g, &mut deopt_sites, trap, pc as u32, &stack, &env);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::LoadIdx, vec![arr, idx], BlockId(bi as u32), VType::Num);
                     stack.push(nid);
                     ctrl = f;
@@ -758,23 +758,23 @@ pub fn lift(
                     let val = stack.pop().ok_or(LiftError::StackUnderflow)?;
                     let idx = stack.pop().ok_or(LiftError::StackUnderflow)?;
                     let arr = stack.pop().ok_or(LiftError::StackUnderflow)?;
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let len = g.alloc(NodeKind::ArrayLen, vec![arr], BlockId(bi as u32), VType::Num);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let zero = g.alloc(NodeKind::ConstNum(0.0), Vec::new(), BlockId(bi as u32), VType::Num);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let neg = g.alloc(NodeKind::Lt, vec![idx, zero], BlockId(bi as u32), VType::Bool);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let ge = g.alloc(NodeKind::Gt, vec![idx, len], BlockId(bi as u32), VType::Bool);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let bad = g.alloc(NodeKind::Or, vec![neg, ge], BlockId(bi as u32), VType::Bool);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let ifn = g.alloc(NodeKind::If, vec![ctrl, bad], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let t = g.alloc(NodeKind::IfTrue, vec![ifn], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let f = g.alloc(NodeKind::IfFalse, vec![ifn], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let trap = g.alloc(
                         NodeKind::UncommonTrap { reason: DeoptReason::BoundsCheck },
                         vec![t],
@@ -782,7 +782,7 @@ pub fn lift(
                         VType::Control,
                     );
                     record_site(&g, &mut deopt_sites, trap, pc as u32, &stack, &env);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let _ = g.alloc(NodeKind::StoreIdx, vec![arr, idx, val], BlockId(bi as u32), VType::Unit);
                     ctrl = f;
                 }
@@ -825,11 +825,11 @@ pub fn lift(
                     if !stack.is_empty() {
                         return Err(LiftError::UnbalancedStack);
                     }
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let ifn = g.alloc(NodeKind::If, vec![ctrl, cond], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let tp = g.alloc(NodeKind::IfTrue, vec![ifn], BlockId(bi as u32), VType::Control);
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let fp = g.alloc(NodeKind::IfFalse, vec![ifn], BlockId(bi as u32), VType::Control);
                     let take = if insn.op == Opcode::JumpIfTrue { tp } else { fp };
                     let skip = if insn.op == Opcode::JumpIfTrue { fp } else { tp };
@@ -894,25 +894,25 @@ pub fn lift(
                         args.push(stack.pop().ok_or(LiftError::StackUnderflow)?);
                     }
                     args.reverse();
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let call = g.alloc(NodeKind::Call { callee }, args, BlockId(bi as u32), VType::Num);
                     stack.push(call);
                     // Calls are safepoints (spec 2.6).
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let sp = g.alloc(NodeKind::Safepoint, vec![ctrl], BlockId(bi as u32), VType::Control);
                     record_site(&g, &mut deopt_sites, sp, pc as u32 + 1, &stack, &env);
                     ctrl = sp;
                 }
                 Opcode::Ret => {
                     let v = stack.pop().ok_or(LiftError::StackUnderflow)?;
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let r = g.alloc(NodeKind::Return, vec![ctrl, v], BlockId(bi as u32), VType::Control);
                     g.ret = Some(r);
                     stack.clear();
                     ctrl = NodeId(u32::MAX);
                 }
                 Opcode::Halt => {
-                    budget_check!();
+                    CEP_BUDGET_CHECK!();
                     let h = g.alloc(NodeKind::Halt, vec![ctrl], BlockId(bi as u32), VType::Control);
                     g.halt = Some(h);
                     // Record the halt's stack shape: the interpreter's Halt
@@ -1083,6 +1083,15 @@ pub(crate) fn idoms(g: &Graph) -> Vec<usize> {
     idom
 }
 
+/// CEP:WHAT: Dominator-tree ancestor intersection (the Cooper-Harvey-Kennedy
+///              idom walk).
+/// CEP:WHY: IDom construction needs the common-ancestor walk; correctness of
+///              every dominance-gated pass depends on it.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none (total over valid idom trees).
+/// CEP:ASSUMES: idom is a well-formed dominator tree; indices ordered.
+/// CEP:COST: O(tree depth) per query.
+/// CEP:EVIDENCE: dominance unit tests; every gated pass depends on it.
 /// Walk to the common dominator ancestor.
 fn intersect(idom: &[usize], mut a: usize, mut b: usize) -> usize {
     while a != b {
@@ -1096,6 +1105,14 @@ fn intersect(idom: &[usize], mut a: usize, mut b: usize) -> usize {
     a
 }
 
+/// CEP:WHAT: Dominance query over the idom tree.
+/// CEP:WHY: local-vn's dominance gate and ir::verify's input-dominance
+///              contract (38.18) both query this.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: false when b is not dominated by a.
+/// CEP:ASSUMES: doms is the idom array from idoms().
+/// CEP:COST: O(tree depth).
+/// CEP:EVIDENCE: dominance unit tests; matrix C regression.
 /// True when block a dominates block b.
 pub(crate) fn dominates(doms: &[usize], a: usize, b: usize) -> bool {
     let mut cur = b;
@@ -1114,6 +1131,19 @@ pub(crate) fn dominates(doms: &[usize], a: usize, b: usize) -> bool {
 /// Verify one graph (standard 38.18): operand ranges, the Halt
 /// requirement, node arities, and — since the local-vn defect — that
 /// every data input dominates its use (38.18 contract: inputs dominate).
+///
+/// CEP:WHAT: Graph verifier: the structural gate at pipeline checkpoints.
+/// CEP:WHY: 38.18 requires re-verification after every pass; dominance
+///          of data inputs became mechanical after the trip-0 defect.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: Err names the first structural violation; the pipeline
+///              refuses to run the graph on any tier.
+/// CEP:ASSUMES: node arenas are dense; BlockId 0 is the entry.
+/// CEP:COST: O(n) plus O(depth) per dominance query.
+/// CEP:EVIDENCE: tests/ir_passes.rs verifier cases; pipeline checkpoints
+///               in engine.rs.
+/// CEP:SECURITY: rejects out-of-range operands before any codegen reads
+///               them.
 ///
 /// # Errors
 /// Returns the first structural violation.

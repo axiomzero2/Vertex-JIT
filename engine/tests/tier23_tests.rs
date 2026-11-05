@@ -20,7 +20,8 @@ use vertex_jit::cold::engine::JitEngine;
 use vertex_jit::cold::ir;
 use vertex_jit::cold::passes::{self, PassBudgets};
 use vertex_jit::cold::tier::{JitBudgets, Tier};
-use vertex_jit::hot::interp::{Exit, HostHooks};
+use vertex_jit::hot::host::HostHooks;
+use vertex_jit::hot::interp::Exit;
 use vertex_jit::hot::value::Value;
 use vertex_jit::platform::TargetConfig;
 
@@ -29,6 +30,14 @@ use vertex_jit::platform::TargetConfig;
 ///
 /// The canonical vectorization fixture: two distinct arrays with static
 /// lengths, a counted loop with stride 1 mapping src[i] * 2 into out[i].
+/// CEP:WHAT: Canonical map-loop program (array + Add map).
+/// CEP:WHY: T2/T3 tests need one shared loop shape whose optimization
+///              behavior is known.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none (pure construction).
+/// CEP:ASSUMES: the shape is inside the vectorizer's canonical form.
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: gvn/licm/pea/vectorize tests use it.
 fn map_program() -> Function {
     // Pseudocode:
     //   src = NEWARR(8); out = NEWARR(8)
@@ -97,6 +106,13 @@ fn map_program() -> Function {
 }
 
 /// Run a function at a tier through the engine.
+/// CEP:WHAT: Run one function pinned to one tier.
+/// CEP:WHY: Tier-pinned runs isolate each optimization tier's effect.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: Err carries the engine error as a string.
+/// CEP:ASSUMES: the tier exists for the function.
+/// CEP:COST: one run.
+/// CEP:EVIDENCE: every tier23 test routes through it.
 fn run_at(f: &Function, tier: Tier) -> Result<Option<Value>, String> {
     let mut e = JitEngine::new(
         vec![f.clone()],
@@ -113,6 +129,14 @@ fn run_at(f: &Function, tier: Tier) -> Result<Option<Value>, String> {
     }
 }
 
+/// CEP:WHAT: GVN removes cross-block redundant computations.
+/// CEP:WHY: Spec 5.1: the T2 value-numbering contract, checked by node-count
+///              and by execution parity.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: node-count plus parity assertions inline.
 #[test]
 fn t2_gvn_eliminates_cross_block_duplicates() {
     // Two identical computations separated by a diamond; GVN must collapse
@@ -160,6 +184,14 @@ fn t2_gvn_eliminates_cross_block_duplicates() {
     assert_eq!(run_at(&f, Tier::T2).expect("t2"), interp, "T2 diverged");
 }
 
+/// CEP:WHAT: LICM hoists loop invariants out of the loop body.
+/// CEP:WHY: Spec 5.1: invariant loads/computations move to the preheader
+///              without changing semantics.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: node placement plus parity assertions inline.
 #[test]
 fn t2_licm_hoists_invariants() {
     // A loop containing a pure invariant computation: LICM must re-home the
@@ -211,6 +243,18 @@ fn t2_licm_hoists_invariants() {
     let _ = body_has_mul;
 }
 
+/// CEP:WHAT: PEA scalar-replaces non-escaping constant arrays (ignored:
+///              ticket CEP-ENGINE-009).
+/// CEP:WHY: The scalar path is proven; materialization at deopt sites that
+///              reference the array is the sanctioned pending work.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: ignored: PEA bails when deopt sites reference the array
+///              (the current bytecode cannot express a site-invisible
+///              array); the refusal gate is tested separately.
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: the ticket tracks completion; vectorizer refusal is
+///               tested below.
 #[test]
 #[ignore = "PEA bails when deopt sites reference the array (materialization at deopt is ticket CEP-ENGINE-009); the current bytecode cannot express a site-invisible array"]
 fn t2_pea_scalar_replaces_constant_arrays() {
@@ -256,6 +300,17 @@ fn t2_pea_scalar_replaces_constant_arrays() {
     assert_eq!(run_at(&f, Tier::T3).expect("t3"), interp, "T3 diverged");
 }
 
+/// CEP:WHAT: The vectorized map result matches the interpreter (ignored:
+///              ticket CEP-ENGINE-012).
+/// CEP:WHY: Vector-loop expansion interacts with loop-phi arity; the scalar
+///              fallback and the refusal gate carry the guarantee until
+///              the ticket lands.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: ignored: expansion shape is pending the ticket; the
+///              scalar fallback and refusal gate are tested.
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: the ticket tracks completion; refusal tested below.
 #[test]
 #[ignore = "vector-loop expansion interacts with loop-phi arity (ticket CEP-ENGINE-012); the scalar fallback and refusal gate are tested"]
 fn t3_vectorized_map_matches_interpreter() {
@@ -269,6 +324,14 @@ fn t3_vectorized_map_matches_interpreter() {
     assert_eq!(run_at(&f, Tier::T3).expect("t3"), interp, "T3 diverged");
 }
 
+/// CEP:WHAT: The vectorizer refuses arrays that can escape (loudly).
+/// CEP:WHY: Spec 4.4.2 safety: vectorizing an escaping array would corrupt
+///              aliasing; refusal is the fail-closed path.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: refusal assertion inline.
 #[test]
 fn vectorizer_refuses_escaping_arrays() {
     // Same map loop but the result array escapes (returned): the

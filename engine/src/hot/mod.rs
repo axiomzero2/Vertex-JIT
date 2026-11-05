@@ -14,10 +14,24 @@
 
 /// Machine value representation and bounded stacks.
 pub mod value;
-/// Baseline interpreter: dispatch loop, profiler, resumable frames.
+/// Fixed-capacity LIFO value stack.
+pub mod stack;
+/// Baseline interpreter: construction surface, profiler, budgets.
 pub mod interp;
+/// The interpreter dispatch loop.
+pub mod interp_run;
+/// Interpreter frame machinery and stack primitives.
+pub mod frame;
+/// Host I/O hooks injected by the embedder.
+pub mod host;
 /// Generational GC heap fast paths: allocation, bounds-checked access,
 /// write barriers.
 pub mod heap;
+/// Heap-side collection primitives: marks, sweeps, walks, root filtering.
+pub mod heap_collect;
+/// One mmap'd generation arena: bump/free-list allocation, start bitmap.
+pub mod arena;
+/// The uncommon-trap machinery and trampoline.
+pub mod trap;
 /// Runtime helpers called from generated machine code.
 pub mod runtime;

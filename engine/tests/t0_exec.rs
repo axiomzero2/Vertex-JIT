@@ -17,7 +17,7 @@ use vertex_jit::cold::bytecode::{decode_vertex, Function, Insn, Operand, Opcode 
 use vertex_jit::cold::code_cache::CodeCache;
 use vertex_jit::cold::tier0::{self, TemplateLibrary};
 use vertex_jit::hot::heap::Heap;
-use vertex_jit::hot::runtime::{with_trampoline, TrampOutcome};
+use vertex_jit::hot::trap::{with_trampoline, TrampOutcome};
 use vertex_jit::hot::value::TypeTag;
 use vertex_jit::platform::TargetConfig;
 
@@ -30,11 +30,20 @@ use vertex_jit::platform::TargetConfig;
 /// CEP:COST: offline.
 /// CEP:EVIDENCE: this file.
 /// CEP:SECURITY: test-authored.
+/// CEP:WHAT: Compile and execute one function at T0, returning the value
+///            word and type tag.
+/// CEP:WHY: T0 tests inspect the raw machine result (word + tag) to pin
+///            the ABI and the value representation.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on compile or run failure.
+/// CEP:ASSUMES: the function is inside the T0 subset.
+/// CEP:COST: one compile plus one run.
+/// CEP:EVIDENCE: every t0_* test routes through it.
 fn exec_t0(f: &Function) -> (u64, TypeTag) {
     let cfg = TargetConfig::detect().expect("target");
     let lib = TemplateLibrary::new(
         vertex_jit::hot::runtime::jit_fmod as *const () as usize,
-        vertex_jit::hot::runtime::jit_trap_div0 as *const () as usize,
+        vertex_jit::hot::trap::jit_trap_div0 as *const () as usize,
     );
     let c = tier0::compile(f, &lib).expect("t0 compile");
     let mut cache = CodeCache::new(&cfg, 1 << 20).expect("cache");
@@ -71,6 +80,13 @@ fn simple_program(op: Op, a: f64, b: f64) -> Function {
     }
 }
 
+/// CEP:WHAT: T0 Add matches the interpreter word-for-word.
+/// CEP:WHY: The first rung of the T0 differential ladder.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: word assertions inline.
 #[test]
 fn t0_add_executes() {
     let (w, tag) = exec_t0(&simple_program(Op::Add, 5.0, 2.0));
@@ -78,6 +94,14 @@ fn t0_add_executes() {
     assert_eq!(f64::from_bits(w), 7.0);
 }
 
+/// CEP:WHAT: T0 Sub/Mul/Div match the interpreter.
+/// CEP:WHY: Each arithmetic template has its own encoding; all three must
+///              agree bit-for-bit.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: word assertions inline.
 #[test]
 fn t0_sub_mul_div() {
     let (w, _) = exec_t0(&simple_program(Op::Sub, 9.0, 4.0));
@@ -88,6 +112,14 @@ fn t0_sub_mul_div() {
     assert_eq!(f64::from_bits(w), 2.5);
 }
 
+/// CEP:WHAT: T0 comparisons decode as bools (type tag 1).
+/// CEP:WHY: Defect class A's collapse fix lands bool words; the tag pins the
+///              decoded type, not just the word.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: word+tag assertions inline; matrix A for depth.
 #[test]
 fn t0_comparisons_return_bools() {
     let (w, tag) = exec_t0(&simple_program(Op::GreaterThan, 5.0, 2.0));
@@ -97,12 +129,20 @@ fn t0_comparisons_return_bools() {
     assert_eq!(w, 0);
 }
 
+/// CEP:WHAT: T0 division by zero traps through the template guard.
+/// CEP:WHY: The trap path crosses into the runtime (hot/trap.rs) and must
+///              surface as the defined error.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: trap assertion inline; differential parity on the trap.
 #[test]
 fn t0_div_by_zero_traps() {
     let cfg = TargetConfig::detect().expect("target");
     let lib = TemplateLibrary::new(
         vertex_jit::hot::runtime::jit_fmod as *const () as usize,
-        vertex_jit::hot::runtime::jit_trap_div0 as *const () as usize,
+        vertex_jit::hot::trap::jit_trap_div0 as *const () as usize,
     );
     let f = simple_program(Op::Div, 1.0, 0.0);
     let c = tier0::compile(&f, &lib).expect("compile");
@@ -116,12 +156,21 @@ fn t0_div_by_zero_traps() {
     cache.seal(base).expect("seal");
     let out = with_trampoline(&mut heap, base as usize, base as usize).expect("trampoline");
     assert!(
-        matches!(out, TrampOutcome::Trapped(s) if s.kind == vertex_jit::hot::runtime::TrapKind::DivideByZero),
+        matches!(out, TrampOutcome::Trapped(s) if s.kind == vertex_jit::hot::trap::TrapKind::DivideByZero),
         "divide by zero must trap: {out:?}"
     );
     cache.release(base);
 }
 
+/// CEP:WHAT: T0 executes locals, a counted loop and a halt tail.
+/// CEP:WHY: End-to-end template discipline: slot addressing, jumps, the
+///              compare-in-head loop and the halt tail that motivated
+///              the Drop fix (matrix B).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: final-value assertion inline; matrices A/B for depth.
 #[test]
 fn t0_locals_and_loop() {
     // i = 0; while i < 3 { i = i + 1 }; return i -> 3
@@ -154,6 +203,16 @@ fn t0_locals_and_loop() {
     assert_eq!(f64::from_bits(w), 3.0);
 }
 
+/// CEP:WHAT: T0 compile stays under the spec 2.1 budget (release builds).
+/// CEP:WHY: The budget is a correctness requirement; the worklist checker and
+///              fixed-size states bound compile() to O(insns).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics when the mean exceeds the budget in release
+///              builds (debug builds skip; CI runs both).
+/// CEP:ASSUMES: release profile; a quiet host.
+/// CEP:COST: one 20k-iteration mean.
+/// CEP:EVIDENCE: benches/EVIDENCE.md records the methodology and the
+///               regression that restored the budget.
 #[test]
 fn t0_compile_latency_under_budget() {
     // Spec 2.1: T0 compiles in under 5 us per function. Measure a
@@ -193,6 +252,14 @@ fn t0_compile_latency_under_budget() {
     }
 }
 
+/// CEP:WHAT: A decode_vertex program executes end-to-end at T0.
+/// CEP:WHY: The production front end feeds compile(); the full path from
+///              bytes to machine code must hold.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: result assertion inline.
 #[test]
 fn t0_decoded_vertex_program_executes() {
     // Golden compiler-output path: decode a Vertex binary stream, compile

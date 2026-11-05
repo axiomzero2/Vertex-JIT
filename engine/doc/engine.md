@@ -41,7 +41,7 @@ tier table records it.
 
 The differential suite (`tests/differential.rs`) drives this loop with
 forced tiers and compares every tier against the interpreter bit-for-bit.
-The regression matrices in `tests/stack_discipline.rs` pin the defect
+The regression matrices in `tests/stack_discipline/` pin the defect
 classes found during development (comparison template stack collapse, Drop
 depth modeling, IR environment snapshots, phi typing, dominance).
 

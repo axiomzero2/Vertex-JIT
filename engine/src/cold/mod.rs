@@ -22,9 +22,14 @@ pub mod tier;
 pub mod code_cache;
 /// Tier 0 copy-and-patch compiler and the x86-64 emitter (spec 2).
 pub mod tier0;
+/// x86-64 byte emitter shared by T0 templates and codegen.
+pub mod tier0_emit;
+/// T0 static legality checker (the T0 trust gate).
+pub mod tier0_check;
 /// Sea of Nodes IR: graph, builder, verifier (spec 3.1, standard 38.17).
 pub mod ir;
 /// Optimization passes (spec 3.2, 4, 5; standard 38.20).
+/// The optimization passes, one per submodule (chapter 62.3.1).
 pub mod passes;
 /// Machine-code lowering from the IR.
 pub mod codegen;

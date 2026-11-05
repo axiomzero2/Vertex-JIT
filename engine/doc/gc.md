@@ -2,7 +2,8 @@
 
 ## Abstract
 
-`engine/src/cold/gc.rs` and `engine/src/hot/heap.rs` implement the managed
+`engine/src/cold/gc.rs` and `engine/src/hot/{heap,arena,heap_collect}.rs`
+implement the managed
 heap: a young generation with bump allocation, an old generation, humongous
 object handling, and the barriers and safepoints compiled code uses. The
 design is single-mutator: collections run at allocation slow paths and at

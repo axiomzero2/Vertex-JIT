@@ -22,8 +22,23 @@ namespace cep {
 
 /// Length of two-character operators (// and /*).
 constexpr std::size_t kTwoChars = 2;
+/// Length of the Rust source extension (".rs").
+constexpr std::size_t kRustExtLen = 3;
 /// The class field marker.
 constexpr const char* kClassField = "CEP:CLASS:";
+
+// CEP:WHAT: True when the path names a Rust source file.
+// CEP:WHY: Rust and C++ share the comment lexer but differ on raw
+//          strings, lifetimes and function signatures.
+// CEP:STATUS: complete
+// CEP:FAILURE: none.
+// CEP:ASSUMES: the dialect is the file extension (.rs per 0.4).
+// CEP:COST: O(1).
+// CEP:EVIDENCE: rust self-test scenarios.
+auto is_rust_path(const std::string& path) -> bool {
+    return path.size() > kRustExtLen
+           && path.compare(path.size() - kRustExtLen, kRustExtLen, ".rs") == 0;
+}
 
 
 // CEP:WHAT: Parse a numeric literal (suffixes stripped) to a double.
@@ -106,16 +121,20 @@ auto is_comment_or_blank(const SourceView& v, std::size_t idx) -> bool {
     return v.code[idx].find_first_not_of(" \t\r") == std::string::npos;
 }
 
-// CEP:WHAT: Lex a C++ source into views; line numbers stay exact.
+// CEP:WHAT: Lex a C++ or Rust source into views; line numbers stay exact.
 // CEP:WHY: All primitives read the same comment/string-separated view.
 // CEP:STATUS: complete
 // CEP:FAILURE: malformed sources lex as plain text; no failure path.
-// CEP:ASSUMES: UTF-8 input; raw strings R"del(...)del".
+// CEP:ASSUMES: UTF-8 input; raw strings R"del(...)del" (C++) and
+//              r#"..."# / r"..." (Rust); Rust lifetimes do not swallow
+//              the following code (standard 50.3 documented limits).
 // CEP:COST: O(bytes) single pass.
-// CEP:EVIDENCE: self-test scenarios with nested strings and comments.
+// CEP:EVIDENCE: self-test scenarios with nested strings, comments and
+//               Rust lifetime/raw-string cases.
 auto lex_source(const std::string& path, const std::string& text, SourceView& out) -> void {
     out = SourceView{};
     out.path = path;
+    const bool rust = is_rust_path(path);
     std::string cur_code;
     std::vector<std::string> cur_comments;
     std::vector<std::string> cur_strings;
@@ -130,11 +149,12 @@ auto lex_source(const std::string& path, const std::string& text, SourceView& ou
     };
 
     /// Lexer states.
-    enum class St { Code, LineComment, BlockComment, Str, Char, RawStr };
+    enum class St { Code, LineComment, BlockComment, Str, Char, RawStr, RustRaw };
     St st = St::Code;
     std::string raw_delim;
     std::string block_acc;
     std::string lit_acc;
+    std::size_t rust_hashes = 0;
     std::size_t i = 0;
     while (i < text.size()) {
         const char c = text[i];
@@ -171,6 +191,22 @@ auto lex_source(const std::string& path, const std::string& text, SourceView& ou
                     ++i;
                     continue;
                 }
+                if (rust && (c == 'r' || (c == 'b' && next == 'r'))) {
+                    // Rust raw strings: r"...", r#"..."#, br"...", br#"..."#.
+                    std::size_t p = (c == 'b') ? i + kTwoChars : i + 1;
+                    std::size_t hashes = 0;
+                    while (p < text.size() && text[p] == '#') {
+                        ++hashes;
+                        ++p;
+                    }
+                    if (p < text.size() && text[p] == '"') {
+                        st = St::RustRaw;
+                        rust_hashes = hashes;
+                        cur_code += "\"\"";
+                        i = p + 1;
+                        continue;
+                    }
+                }
                 if (c == '"') {
                     st = St::Str;
                     lit_acc.clear();
@@ -179,6 +215,28 @@ auto lex_source(const std::string& path, const std::string& text, SourceView& ou
                     continue;
                 }
                 if (c == '\'') {
+                    if (rust && next != '\\') {
+                        // Rust: a char literal is 'x' (one ident char), a
+                        // lifetime is 'ident with no closing quote here.
+                        std::size_t k = i + 1;
+                        while (k < text.size()
+                               && (std::isalnum(static_cast<unsigned char>(text[k])) != 0
+                                   || text[k] == '_')) {
+                            ++k;
+                        }
+                        if (k == i + kTwoChars && k < text.size() && text[k] == '\'') {
+                            st = St::Char;
+                            cur_code.push_back('\'');
+                            ++i;
+                            continue;
+                        }
+                        cur_code.push_back('\'');
+                        for (std::size_t q = i + 1; q < k; ++q) {
+                            cur_code.push_back(text[q]);
+                        }
+                        i = k;
+                        continue;
+                    }
                     st = St::Char;
                     cur_code.push_back('\'');
                     ++i;
@@ -262,6 +320,25 @@ auto lex_source(const std::string& path, const std::string& text, SourceView& ou
                 }
                 ++i;
                 continue;
+            case St::RustRaw:
+                if (c == '"') {
+                    std::size_t k = i + 1;
+                    std::size_t seen = 0;
+                    while (k < text.size() && text[k] == '#' && seen < rust_hashes) {
+                        ++k;
+                        ++seen;
+                    }
+                    if (seen == rust_hashes) {
+                        st = St::Code;
+                        i = k;
+                        continue;
+                    }
+                }
+                if (c == '\n') {
+                    flush();
+                }
+                ++i;
+                continue;
         }
     }
     if (!cur_code.empty() || !cur_comments.empty()) {
@@ -291,6 +368,19 @@ auto lex_source(const std::string& path, const std::string& text, SourceView& ou
 
 namespace {
 
+// CEP:WHAT: True when the trimmed header text names a Rust fn definition.
+// CEP:WHY: The Rust extractor must reject closures, trait declarations,
+//          fn-pointer types and `macro_rules!` internals.
+// CEP:STATUS: complete
+// CEP:FAILURE: false for non-signature headers.
+// CEP:ASSUMES: ECMAScript regex grammar; candidates end at a body brace.
+// CEP:COST: O(header).
+// CEP:EVIDENCE: rust function self-test scenarios.
+auto rust_signature_match(const std::string& trimmed, std::smatch& m) -> bool {
+    static const std::regex fn_re("\\bfn\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*[(<]");
+    return std::regex_search(trimmed, m, fn_re);
+}
+
 // CEP:WHAT: True when the trimmed header text is a function signature.
 // CEP:WHY: The extractor must reject control-flow and class headers.
 // CEP:STATUS: complete
@@ -315,15 +405,17 @@ auto signature_match(const std::string& trimmed, std::smatch& m) -> bool {
 
 // CEP:WHAT: Extract function definitions from the stripped code view.
 // CEP:WHY: FUNC-BLOCK, STUB-BODY, CONSTANT-RETURN and NAMING-FUNC all
-//          consume the same definition list.
+//          consume the same definition list. Rust `fn` definitions are
+//          extracted through the rust_signature_match analog (0.4).
 // CEP:STATUS: complete
 // CEP:FAILURE: lambdas, control headers and class bodies are not returned.
 // CEP:ASSUMES: brace-balanced input; approximate statement counting per
 //              standard 50.3 limits.
 // CEP:COST: O(bytes).
-// CEP:EVIDENCE: self-test function scenarios.
+// CEP:EVIDENCE: self-test function scenarios (C++ and Rust).
 auto extract_functions(const SourceView& v) -> std::vector<FuncDef> {
     std::vector<FuncDef> out;
+    const bool rust = is_rust_path(v.path);
     std::string flat;
     std::vector<long> line_of;
     for (std::size_t li = 0; li < v.code.size(); ++li) {
@@ -354,7 +446,9 @@ auto extract_functions(const SourceView& v) -> std::vector<FuncDef> {
             }
             const bool lambda_end =
                 probe.size() >= kTwoChars && probe.compare(probe.size() - kTwoChars, kTwoChars, "]{") == 0;
-            if (!lambda_end && signature_match(trimmed, m)) {
+            const bool matched = rust ? rust_signature_match(trimmed, m)
+                                      : (!lambda_end && signature_match(trimmed, m));
+            if (matched) {
                 const std::string fname = m[1].str();
                 std::size_t d = 1;
                 std::size_t j = i + 1;
@@ -375,6 +469,24 @@ auto extract_functions(const SourceView& v) -> std::vector<FuncDef> {
                     }
                     ++j;
                 }
+                if (rust) {
+                    // Rust expression bodies (`fn f() -> T { expr }`) end
+                    // without a semicolon; the tail expression is the one
+                    // statement of the body. An all-whitespace body stays
+                    // empty (50.3 documents the approximation).
+                    bool has_tail = false;
+                    for (std::size_t k = i + 1; k + 1 < j; ++k) {
+                        if (flat[k] != ' ' && flat[k] != '\t' && flat[k] != '\n'
+                            && flat[k] != '\r') {
+                            has_tail = true;
+                            break;
+                        }
+                    }
+                    if (has_tail) {
+                        // The tail expression is one statement of the body.
+                        statements += 1;
+                    }
+                }
                 FuncDef fd;
                 fd.name = fname;
                 fd.header_line = line_of[first];
@@ -382,8 +494,8 @@ auto extract_functions(const SourceView& v) -> std::vector<FuncDef> {
                 fd.end_line = (j - 1 < line_of.size()) ? line_of[j - 1] : line_of.back();
                 fd.statements = statements;
                 fd.empty = statements == 0;
-                fd.exempt_name =
-                    !fname.empty() && (fname[0] == '~' || fname.rfind("operator", 0) == 0);
+                fd.exempt_name = !rust && !fname.empty()
+                                 && (fname[0] == '~' || fname.rfind("operator", 0) == 0);
                 out.push_back(std::move(fd));
             }
             ++depth;

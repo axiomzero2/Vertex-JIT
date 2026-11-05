@@ -52,6 +52,15 @@ pub enum TargetError {
 }
 
 impl core::fmt::Display for TargetError {
+    /// Human-readable target error text.
+/// CEP:WHAT: Display for TargetError.
+/// CEP:WHY: Bootstrap failures print the reason
+///              (Law 6: loud failure).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: manual invocation; platform tests.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let text = match self {
             TargetError::UnsupportedArchitecture => "host architecture is not x86-64",
@@ -176,6 +185,14 @@ fn detect_vector_features() -> (bool, bool) {
 mod tests {
     use super::*;
 
+    /// CEP:WHAT: TargetConfig::detect succeeds on supported hosts.
+/// CEP:WHY: The engine cannot start without a target; detection must succeed
+///              on every CI runner.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: assertion inline.
     #[test]
     fn detect_succeeds_on_supported_targets() {
         let cfg = TargetConfig::detect();
@@ -184,6 +201,14 @@ mod tests {
         let _ = cfg;
     }
 
+    /// CEP:WHAT: Pointer validation rejects out-of-range (wide) pointers.
+/// CEP:WHY: Wide pointers must never dereference (section 25.3); the bounds
+///              check is the single gate.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: negative case asserted inline.
     #[test]
     fn validate_pointer_bounds_rejects_wide_pointers() {
         let cfg = TargetConfig {

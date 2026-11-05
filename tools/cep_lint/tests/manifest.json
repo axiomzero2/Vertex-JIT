@@ -1,307 +1,637 @@
 {
-  "scenarios": [
+ "scenarios": [
+  {
+   "name": "file_header_compliant",
+   "files": [
+    "cases/fh_ok.cpp"
+   ],
+   "expect": [
     {
-      "name": "clean_file_negative_control",
-      "files": [
-        "cases/header_ok.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-FILE-HEADER",
-          "count": 0
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        },
-        {
-          "rule": "CEP-LINT-MAGIC-NUMBER",
-          "count": 0
-        },
-        {
-          "rule": "CEP-LINT-HOT-BANNED",
-          "count": 0
-        },
-        {
-          "rule": "CEP-LINT-NAMING-FUNC",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "file_header_missing",
-      "files": [
-        "cases/header_missing.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-FILE-HEADER",
-          "count": 10
-        }
-      ]
-    },
-    {
-      "name": "status_value_unsanctioned",
-      "files": [
-        "cases/status_bad.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-STATUS-VALUE",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-STUB-DECL",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "todo_markers_unowned",
-      "files": [
-        "cases/todo_unowned.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-TODO-OWNER",
-          "count": 3
-        }
-      ]
-    },
-    {
-      "name": "stub_declaration_unowned",
-      "files": [
-        "cases/stub_unowned.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-STUB-DECL",
-          "count": 2
-        },
-        {
-          "rule": "CEP-LINT-STATUS-VALUE",
-          "count": 0
-        },
-        {
-          "rule": "CEP-LINT-STUB-BODY",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "placeholder_comment_markers",
-      "files": [
-        "cases/placeholder_comment.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-PLACEHOLDER-COMMENT",
-          "count": 2
-        }
-      ]
-    },
-    {
-      "name": "placeholder_text_in_literal",
-      "files": [
-        "cases/placeholder_text.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-PLACEHOLDER-TEXT",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "magic_number_contexts",
-      "files": [
-        "cases/magic_numbers.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-MAGIC-NUMBER",
-          "count": 2
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "macro_prefix",
-      "files": [
-        "cases/macros.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-MACRO-PREFIX",
-          "count": 1
-        }
-      ]
-    },
-    {
-      "name": "hot_banned_tokens",
-      "files": [
-        "cases/hot_banned.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-HOT-BANNED",
-          "count": 2
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "hot_clean_negative_control",
-      "files": [
-        "cases/hot_clean.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-HOT-BANNED",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "empty_catch_and_branch",
-      "files": [
-        "cases/empty_shapes.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-EMPTY-BRANCH",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-EMPTY-CATCH",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "constant_return",
-      "files": [
-        "cases/constant_return.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-CONSTANT-RETURN",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "naming_type_and_func",
-      "files": [
-        "cases/naming.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-NAMING-TYPE",
-          "count": 2
-        },
-        {
-          "rule": "CEP-LINT-NAMING-FUNC",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "commented_out_code",
-      "files": [
-        "cases/commented_code.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-COMMENTED-CODE",
-          "count": 2
-        }
-      ]
-    },
-    {
-      "name": "stub_body_empty",
-      "files": [
-        "cases/stub_body.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-STUB-BODY",
-          "count": 1
-        },
-        {
-          "rule": "CEP-LINT-FUNC-BLOCK",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "scenario_config_overlay",
-      "config": {
-        "rules": {
-          "CEP-LINT-MAGIC-NUMBER": {
-            "allowed_values": [
-              "0",
-              "1",
-              "5"
-            ]
-          }
-        }
-      },
-      "files": [
-        "cases/magic_numbers.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-MAGIC-NUMBER",
-          "count": 2
-        }
-      ]
-    },
-    {
-      "name": "naming_type_enum_class_clean",
-      "files": [
-        "cases/enum_class_clean.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-NAMING-TYPE",
-          "count": 0
-        }
-      ]
-    },
-    {
-      "name": "naming_type_enum_class_bad",
-      "files": [
-        "cases/enum_class_bad.cpp"
-      ],
-      "expect": [
-        {
-          "rule": "CEP-LINT-NAMING-TYPE",
-          "count": 4
-        }
-      ]
+     "rule": "CEP-LINT-FILE-HEADER",
+     "count": 0
     }
-  ]
+   ]
+  },
+  {
+   "name": "file_header_violating",
+   "files": [
+    "cases/fh_missing.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-FILE-HEADER",
+     "count": 1
+    },
+    {
+     "rule": "CEP-LINT-MACRO-PREFIX",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "func_block_compliant",
+   "files": [
+    "cases/fb_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-FUNC-BLOCK",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "func_block_violating",
+   "files": [
+    "cases/fb_missing.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-FUNC-BLOCK",
+     "count": 1
+    },
+    {
+     "rule": "CEP-LINT-CONSTANT-RETURN",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "status_value_compliant",
+   "files": [
+    "cases/sv_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-STATUS-VALUE",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "status_value_violating",
+   "files": [
+    "cases/sv_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-STATUS-VALUE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "todo_owner_compliant",
+   "files": [
+    "cases/todo_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-TODO-OWNER",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "todo_owner_violating",
+   "files": [
+    "cases/todo_unowned.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-TODO-OWNER",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "stub_decl_compliant",
+   "files": [
+    "cases/stub_decl_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-STUB-DECL",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "stub_decl_violating",
+   "files": [
+    "cases/stub_unowned.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-STUB-DECL",
+     "count": 2
+    }
+   ]
+  },
+  {
+   "name": "placeholder_comment_compliant",
+   "files": [
+    "cases/phc_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-PLACEHOLDER-COMMENT",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "placeholder_comment_violating",
+   "files": [
+    "cases/phc_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-PLACEHOLDER-COMMENT",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "placeholder_text_compliant",
+   "files": [
+    "cases/pht_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-PLACEHOLDER-TEXT",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "placeholder_text_violating",
+   "files": [
+    "cases/pht_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-PLACEHOLDER-TEXT",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "magic_number_compliant",
+   "files": [
+    "cases/mn_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-MAGIC-NUMBER",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "magic_number_violating",
+   "files": [
+    "cases/mn_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-MAGIC-NUMBER",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "macro_prefix_compliant",
+   "files": [
+    "cases/mac_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-MACRO-PREFIX",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "macro_prefix_violating",
+   "files": [
+    "cases/mac_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-MACRO-PREFIX",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "hot_banned_compliant",
+   "files": [
+    "cases/hot_clean.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-HOT-BANNED",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "hot_banned_violating",
+   "files": [
+    "cases/hot_banned.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-HOT-BANNED",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "stub_body_compliant",
+   "files": [
+    "cases/sb_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-STUB-BODY",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "stub_body_violating",
+   "files": [
+    "cases/sb_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-STUB-BODY",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "empty_catch_compliant",
+   "files": [
+    "cases/ec_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-EMPTY-CATCH",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "empty_catch_violating",
+   "files": [
+    "cases/ec_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-EMPTY-CATCH",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "empty_branch_compliant",
+   "files": [
+    "cases/eb_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-EMPTY-BRANCH",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "empty_branch_violating",
+   "files": [
+    "cases/eb_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-EMPTY-BRANCH",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "constant_return_compliant",
+   "files": [
+    "cases/cr_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-CONSTANT-RETURN",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "constant_return_violating",
+   "files": [
+    "cases/cr_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-CONSTANT-RETURN",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "naming_compliant",
+   "files": [
+    "cases/nm_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-NAMING-TYPE",
+     "count": 0
+    },
+    {
+     "rule": "CEP-LINT-NAMING-FUNC",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "naming_violating",
+   "files": [
+    "cases/nm_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-NAMING-TYPE",
+     "count": 1
+    },
+    {
+     "rule": "CEP-LINT-NAMING-FUNC",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "commented_code_compliant",
+   "files": [
+    "cases/cc_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-COMMENTED-CODE",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "commented_code_violating",
+   "files": [
+    "cases/cc_bad.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-COMMENTED-CODE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_compliant",
+   "files": [
+    "cases/atomic_ok.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_line_limit",
+   "files": [
+    "cases/atomic_line_over.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_junk_name",
+   "files": [
+    "cases/junk_name_util.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_single_pass",
+   "files": [
+    "cases/passes/one_pass.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_pass_landfill",
+   "files": [
+    "cases/passes/landfill.cpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_single_isel_category",
+   "files": [
+    "cases/isel/one_cat.hpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "atomic_file_two_isel_categories",
+   "files": [
+    "cases/isel/two_cats.hpp"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "rust_dialect_compliant",
+   "files": [
+    "cases/rs_ok.rs",
+    "cases/rs_lifetime_ok.rs"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-FILE-HEADER",
+     "count": 0
+    },
+    {
+     "rule": "CEP-LINT-FUNC-BLOCK",
+     "count": 0
+    },
+    {
+     "rule": "CEP-LINT-MACRO-PREFIX",
+     "count": 0
+    },
+    {
+     "rule": "CEP-LINT-PLACEHOLDER-COMMENT",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "rust_fn_block_violating",
+   "files": [
+    "cases/rs_fn_block_missing.rs"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-FUNC-BLOCK",
+     "count": 1
+    },
+    {
+     "rule": "CEP-LINT-STUB-BODY",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "rust_macro_prefix_violating",
+   "files": [
+    "cases/rs_macro_bad.rs"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-MACRO-PREFIX",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "rust_file_header_violating",
+   "files": [
+    "cases/rs_header_missing.rs"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-FILE-HEADER",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "rust_atomic_line_limit",
+   "files": [
+    "cases/atomic_rs_over.rs"
+   ],
+   "expect": [
+    {
+     "rule": "CEP-LINT-ATOMIC-FILE",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "doc_sync_compliant",
+   "files": [
+    "cases/fh_ok.cpp"
+   ],
+   "config": {
+    "standard": {
+     "version": "0.4",
+     "document": "tools/cep_lint/tests/cases/doc_all_rules.md"
+    }
+   },
+   "expect": [
+    {
+     "rule": "CEP-LINT-DOC-SYNC",
+     "count": 0
+    }
+   ]
+  },
+  {
+   "name": "doc_sync_documented_rule_missing_from_config",
+   "files": [
+    "cases/fh_ok.cpp"
+   ],
+   "config": {
+    "standard": {
+     "version": "0.4",
+     "document": "tools/cep_lint/tests/cases/doc_missing_rule.md"
+    }
+   },
+   "expect": [
+    {
+     "rule": "CEP-LINT-DOC-SYNC",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "doc_sync_configured_rule_missing_from_document",
+   "files": [
+    "cases/fh_ok.cpp"
+   ],
+   "config": {
+    "standard": {
+     "version": "0.4",
+     "document": "tools/cep_lint/tests/cases/doc_extra_rule.md"
+    }
+   },
+   "expect": [
+    {
+     "rule": "CEP-LINT-DOC-SYNC",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "doc_sync_version_mismatch",
+   "files": [
+    "cases/fh_ok.cpp"
+   ],
+   "config": {
+    "standard": {
+     "version": "0.4",
+     "document": "tools/cep_lint/tests/cases/doc_version_mismatch.md"
+    }
+   },
+   "expect": [
+    {
+     "rule": "CEP-LINT-DOC-SYNC",
+     "count": 1
+    }
+   ]
+  }
+ ]
 }

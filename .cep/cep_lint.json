@@ -1,8 +1,14 @@
 {
   "standard": {
-    "version": "0.3",
+    "version": "0.4",
     "document": "standard.md"
   },
+  "file_globs": [
+    "engine/src/**/*.rs",
+    "engine/tests/**/*.rs",
+    "engine/examples/**/*.rs",
+    "engine/benches/**/*.rs"
+  ],
   "fail_on": [
     0,
     1
@@ -226,6 +232,27 @@
       "doc_path": "standard.md",
       "heading_pattern": "###\\s+Rule\\s+(CEP-LINT-[A-Za-z0-9-]+)",
       "version_pattern": "Version:\\s*\\*\\*([0-9][0-9.]*)\\*\\*"
+    },
+    "CEP-LINT-ATOMIC-FILE": {
+      "severity": 1,
+      "check": "file_topology_policy",
+      "class_limits": {
+        "CEP-0": 400,
+        "CEP-1": 800,
+        "CEP-2": 1200
+      },
+      "banned_name_substrings": [
+        "util",
+        "helper",
+        "misc",
+        "common"
+      ],
+      "pass_dir_marker": "/passes/",
+      "max_pass_registrations": 1,
+      "pass_registration_pattern": "CEP:\\s*PASS:\\s*([A-Za-z0-9_-]+)",
+      "isel_dir_marker": "/isel/",
+      "max_isel_categories": 1,
+      "isel_category_pattern": "CEP:ISEL-CATEGORY:\\s*([A-Za-z0-9_]+)"
     }
   }
 }

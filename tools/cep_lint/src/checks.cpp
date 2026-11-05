@@ -532,13 +532,15 @@ auto check_numeric_literal_policy(const Rule& r, const SourceView& v, std::vecto
 }
 
 // CEP:WHAT: Primitive macro_prefix_policy.
-// CEP:WHY: MACRO-PREFIX enforces the CEP_ prefix on object-like macros.
+// CEP:WHY: MACRO-PREFIX enforces the CEP_ prefix on object-like macros;
+//          in Rust sources macro_rules! definitions are the object-like
+//          macro analog and obey the same patterns (0.4 applicability).
 // CEP:STATUS: complete
 // CEP:FAILURE: findings name the macro; function-like macros rely on
 //              review (documented limit 50.3).
 // CEP:ASSUMES: name and guard patterns from the configuration.
 // CEP:COST: O(lines).
-// CEP:EVIDENCE: macro self-test scenarios.
+// CEP:EVIDENCE: macro self-test scenarios (C++ and Rust).
 auto check_macro_prefix_policy(const Rule& r, const SourceView& v, std::vector<Finding>& out)
     -> void {
     const std::string name_pat = r.params.str("name_pattern");
@@ -548,6 +550,22 @@ auto check_macro_prefix_policy(const Rule& r, const SourceView& v, std::vector<F
     std::string err;
     if (!compile_re(name_pat, r.key, name_re, err) || !compile_re(guard_pat, r.key, guard_re, err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
+        return;
+    }
+    if (is_rust_path(v.path)) {
+        static const std::regex macro_rules_re("\\bmacro_rules!\\s+([A-Za-z_][A-Za-z0-9_]*)");
+        for (std::size_t i = 0; i < v.code.size(); ++i) {
+            std::smatch m;
+            if (!std::regex_search(v.code[i], m, macro_rules_re)) {
+                continue;
+            }
+            const std::string name = m[1].str();
+            if (std::regex_match(name, name_re) || std::regex_match(name, guard_re)) {
+                continue;
+            }
+            add(out, v.path, static_cast<long>(i), r.key, r.severity,
+                "macro_rules! definition lacks the CEP_ prefix");
+        }
         return;
     }
     static const std::regex define_re("^\\s*#\\s*define\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()?");
@@ -634,6 +652,110 @@ auto check_flat_code_regex(const Rule& r, const SourceView& v, std::vector<Findi
     }
 }
 
+// CEP:WHAT: Primitive file_topology_policy (chapter 62.5.3).
+// CEP:WHY: CEP-LINT-ATOMIC-FILE enforces the line limits by declared
+//          class, rejects junk-drawer file names and bounds the pass
+//          and ISEL registration counts per file.
+// CEP:STATUS: complete
+// CEP:FAILURE: none (all inputs validated at load).
+// CEP:ASSUMES: the declared class prefix-matches a configured limit key;
+//              directories are identified by configured path markers.
+// CEP:COST: O(lines x patterns).
+// CEP:EVIDENCE: topology self-test scenarios with exact counts.
+auto check_file_topology_policy(const Rule& r, const SourceView& v, std::vector<Finding>& out)
+    -> void {
+    // (1) Hard file size limits per declared class (62.5.1).
+    const Json* limits = r.params.find("class_limits");
+    if (limits != nullptr && limits->is_object() && !v.declared_class.empty()) {
+        for (const auto& kv : limits->members) {
+            if (v.declared_class.rfind(kv.first, 0) == 0) {
+                const long max_lines = static_cast<long>(kv.second.number);
+                const long lines = static_cast<long>(v.code.size());
+                if (lines > max_lines) {
+                    add(out, v.path, 0, r.key, r.severity,
+                        "file exceeds the " + kv.first + " line limit");
+                }
+                break;
+            }
+        }
+    }
+    // (2) Junk-drawer file names (62.4).
+    const std::vector<std::string> banned = r.params.str_array("banned_name_substrings");
+    std::string name = v.path;
+    const std::size_t slash = name.find_last_of('/');
+    if (slash != std::string::npos) {
+        name = name.substr(slash + 1);
+    }
+    const std::size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) {
+        name = name.substr(0, dot);
+    }
+    std::string lower;
+    for (const char c : name) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    for (const std::string& b : banned) {
+        if (!b.empty() && lower.find(b) != std::string::npos) {
+            add(out, v.path, 0, r.key, r.severity,
+                "file name is a banned junk-drawer name");
+            break;
+        }
+    }
+    // (3) One pass registration per file under the passes tree (62.3.1).
+    const std::string pass_marker = r.params.str("pass_dir_marker");
+    const std::string pass_pattern = r.params.str("pass_registration_pattern");
+    if (!pass_marker.empty() && !pass_pattern.empty()
+        && v.path.find(pass_marker) != std::string::npos) {
+        std::regex pass_re;
+        std::string err;
+        if (!compile_re(pass_pattern, r.key, pass_re, err)) {
+            std::fprintf(stderr, "%s\n", err.c_str());
+            return;
+        }
+        const long max_passes = r.params.integer("max_pass_registrations", 1);
+        std::set<std::string> names;
+        for (const auto& line_comments : v.comments) {
+            for (const std::string& cmt : line_comments) {
+                std::smatch m;
+                if (std::regex_search(cmt, m, pass_re)) {
+                    names.insert(m[1].str());
+                }
+            }
+        }
+        if (static_cast<long>(names.size()) > max_passes) {
+            add(out, v.path, 0, r.key, r.severity,
+                "file registers more than one optimization pass");
+        }
+    }
+    // (4) One instruction class category per file under an isel tree
+    //     (62.3.3), detected through the configured comment tag.
+    const std::string isel_marker = r.params.str("isel_dir_marker");
+    const std::string isel_pattern = r.params.str("isel_category_pattern");
+    if (!isel_marker.empty() && !isel_pattern.empty()
+        && v.path.find(isel_marker) != std::string::npos) {
+        std::regex isel_re;
+        std::string err;
+        if (!compile_re(isel_pattern, r.key, isel_re, err)) {
+            std::fprintf(stderr, "%s\n", err.c_str());
+            return;
+        }
+        std::set<std::string> categories;
+        for (const auto& line_comments : v.comments) {
+            for (const std::string& cmt : line_comments) {
+                std::smatch m;
+                if (std::regex_search(cmt, m, isel_re)) {
+                    categories.insert(m[1].str());
+                }
+            }
+        }
+        const long max_cats = r.params.integer("max_isel_categories", 1);
+        if (static_cast<long>(categories.size()) > max_cats) {
+            add(out, v.path, 0, r.key, r.severity,
+                "file covers more than one instruction class category");
+        }
+    }
+}
+
 }  // namespace
 
 // CEP:WHAT: Run every configured rule over one file; appends findings.
@@ -653,8 +775,22 @@ auto lint_file(const Config& cfg, const std::string& path, std::vector<Finding>&
     }
     SourceView v;
     lex_source(path, text, v);
+    // The 0.4 applicability note: the mechanical comment-discipline rules
+    // apply to the first-party dialects declared by file_globs. For Rust
+    // sources the C++-specific primitives are out of scope; the
+    // comment-discipline family and the macro analog stay active.
+    const bool rust = is_rust_path(path);
     for (const Rule& r : cfg.rules) {
         if (r.check == "doc_rule_coverage") {
+            continue;
+        }
+        if (rust
+            && (r.check == "string_literal_regex" || r.check == "numeric_literal_policy"
+                || r.check == "banned_token_policy" || r.check == "flat_code_regex")) {
+            continue;
+        }
+        if (rust && r.check == "function_policy"
+            && (r.mode == "naming" || r.mode == "constant_return")) {
             continue;
         }
         if (r.check == "comment_block_schema") {
@@ -673,6 +809,8 @@ auto lint_file(const Config& cfg, const std::string& path, std::vector<Finding>&
             check_banned_token_policy(r, v, out);
         } else if (r.check == "flat_code_regex") {
             check_flat_code_regex(r, v, out);
+        } else if (r.check == "file_topology_policy") {
+            check_file_topology_policy(r, v, out);
         } else {
             err = "CEP-LINT-BOOT-6: unknown check primitive '" + r.check + "' for rule " + r.key;
             return false;
@@ -695,7 +833,11 @@ auto doc_rule_coverage(const Config& cfg, std::vector<Finding>& out, std::string
         err = "CEP-LINT-BOOT-1: cannot read standard document " + cfg.doc_path;
         return false;
     }
-    static const std::regex heading_re("###\\s+Rule\\s+(CEP-LINT-[A-Za-z0-9-]+)");
+    // Both documented heading forms are rule sections: the chapter-50
+    // catalog entry ('### Rule KEY') and the chapter-62 declaration
+    // ('### 62.5.3 `cep_lint` Rule: KEY').
+    static const std::regex heading_re(
+        "^###\\s+(?:Rule\\s+|.*\\bRule:\\s*)(CEP-LINT-[A-Za-z0-9-]+)");
     static const std::regex version_re("Version:\\s*\\*\\*([0-9][0-9.]*)\\*\\*");
     std::set<std::string> documented;
     std::set<std::string> seen;
@@ -783,6 +925,11 @@ auto run_scenario(const Json& base_cfg, const std::string& manifest_dir, const J
         if (!lint_file(cfg, full, findings, err)) {
             return {};
         }
+    }
+    // DOC-SYNC is a configured rule; its scenarios drive it through the
+    // overlay document so the manifest covers it like every other rule.
+    if (!doc_rule_coverage(cfg, findings, err)) {
+        return {};
     }
     return findings;
 }

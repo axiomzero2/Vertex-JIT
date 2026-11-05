@@ -312,7 +312,7 @@ pub fn age_survivors(heap: &mut Heap, old: bool) {
 /// CEP:COST: O(frame slots).
 /// CEP:EVIDENCE: tests/gc_tests.rs.
 /// CEP:SECURITY: only in-arena pointers are returned.
-pub fn frame_roots(frames: &[crate::hot::interp::FnFrame]) -> Vec<usize> {
+pub fn frame_roots(frames: &[crate::hot::frame::FnFrame]) -> Vec<usize> {
     let mut roots = Vec::new();
     for f in frames {
         for i in 0..f.stack.len() {
@@ -351,7 +351,7 @@ pub fn frame_roots(frames: &[crate::hot::interp::FnFrame]) -> Vec<usize> {
 /// Propagates OutOfMemory after one collection.
 pub fn with_gc_retry<T>(
     heap: &mut Heap,
-    frames: &[crate::hot::interp::FnFrame],
+    frames: &[crate::hot::frame::FnFrame],
     f: impl Fn(&mut Heap) -> Result<T, EngineError>,
 ) -> Result<T, EngineError> {
     match f(heap) {

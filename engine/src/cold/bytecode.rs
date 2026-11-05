@@ -423,7 +423,7 @@ pub fn decode_vertex(name: &str, bytes: &[u8]) -> Result<Function, BytecodeError
     let mut locals: Vec<String> = Vec::new();
     let mut strings: Vec<String> = Vec::new();
 
-    macro_rules! need {
+    macro_rules! CEP_NEED {
         ($n:expr, $what:expr) => {
             if p + $n > bytes.len() {
                 return Err(BytecodeError::Truncated { at: p, what: $what });
@@ -457,13 +457,13 @@ pub fn decode_vertex(name: &str, bytes: &[u8]) -> Result<Function, BytecodeError
             | Opcode::Ret
             | Opcode::Halt => Operand::None,
             Opcode::PushBool => {
-                need!(1, "bool operand");
+                CEP_NEED!(1, "bool operand");
                 let v = bytes[p];
                 p += 1;
                 Operand::U64(u64::from(v != 0))
             }
             Opcode::PushNumber => {
-                need!(4, "f32 operand");
+                CEP_NEED!(4, "f32 operand");
                 let mut b = [0u8; 4];
                 b.copy_from_slice(&bytes[p..p + 4]);
                 p += 4;
@@ -471,24 +471,24 @@ pub fn decode_vertex(name: &str, bytes: &[u8]) -> Result<Function, BytecodeError
                 Operand::F64(crate::hot::value::canonicalize_f64(f))
             }
             Opcode::PushUsize | Opcode::Call => {
-                need!(8, "u64 operand");
+                CEP_NEED!(8, "u64 operand");
                 let mut b = [0u8; 8];
                 b.copy_from_slice(&bytes[p..p + 8]);
                 p += 8;
                 Operand::U64(u64::from_le_bytes(b))
             }
             Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
-                need!(2, "u16 jump operand");
+                CEP_NEED!(2, "u16 jump operand");
                 let t = u16::from_le_bytes([bytes[p], bytes[p + 1]]);
                 p += 2;
                 Operand::Target(u32::from(t))
             }
             Opcode::PushString => {
-                need!(4, "u32 string length");
+                CEP_NEED!(4, "u32 string length");
                 let l = u32::from_le_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]])
                     as usize;
                 p += 4;
-                need!(l, "string bytes");
+                CEP_NEED!(l, "string bytes");
                 let s = core::str::from_utf8(&bytes[p..p + l])
                     .map_err(|_| BytecodeError::InvalidUtf8 { at: p })?;
                 p += l;
@@ -499,11 +499,11 @@ pub fn decode_vertex(name: &str, bytes: &[u8]) -> Result<Function, BytecodeError
                 Operand::StrId((strings.len() - 1) as u32)
             }
             Opcode::StoreVar | Opcode::LoadVar | Opcode::AssignVar | Opcode::Drop => {
-                need!(4, "u32 name length");
+                CEP_NEED!(4, "u32 name length");
                 let l = u32::from_le_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]])
                     as usize;
                 p += 4;
-                need!(l, "name bytes");
+                CEP_NEED!(l, "name bytes");
                 let s = core::str::from_utf8(&bytes[p..p + l])
                     .map_err(|_| BytecodeError::InvalidUtf8 { at: p })?;
                 p += l;
@@ -586,6 +586,15 @@ const _: () = {
 mod tests {
     use super::*;
 
+    /// CEP:WHAT: Arithmetic stream decode: Push/Add/Sub/Mul/Div words.
+/// CEP:WHY: The decoder is the front door for untrusted bytecode; the
+///              arithmetic path pins word widths and NaN
+///              canonicalization at decode.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: golden bytes asserted inline.
     #[test]
     fn decodes_arithmetic_stream() {
         let mut b = Vec::new();
@@ -601,6 +610,14 @@ mod tests {
         assert_eq!(f.code[3].op, Opcode::Halt);
     }
 
+    /// CEP:WHAT: Name-prefixed instructions and label resolution.
+/// CEP:WHY: Store/Load/Assign names and jump targets are the two variable
+///              width encodings; both must round-trip exactly.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: golden bytes asserted inline.
     #[test]
     fn decodes_names_and_jumps() {
         let mut b = Vec::new();
@@ -619,6 +636,14 @@ mod tests {
         assert_eq!(f.code[2].operand, Operand::Target(0));
     }
 
+    /// CEP:WHAT: Reject unknown opcodes and truncated streams.
+/// CEP:WHY: Fail-closed decode (Law 6): malformed input must never produce a
+///              half-function.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: negative cases asserted inline.
     #[test]
     fn rejects_unknown_opcode_and_truncation() {
         assert_eq!(
@@ -631,6 +656,14 @@ mod tests {
         ));
     }
 
+    /// CEP:WHAT: Reject jump targets beyond the instruction stream.
+/// CEP:WHY: Out-of-range jumps would corrupt the compiler's pc walk; the
+///              decoder rejects them before any tier sees the function.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: negative case asserted inline.
     #[test]
     fn rejects_jump_out_of_range() {
         let mut b = vec![40u8];
@@ -642,11 +675,27 @@ mod tests {
         ));
     }
 
+    /// CEP:WHAT: Reject a function whose last instruction is not Halt.
+/// CEP:WHY: Every tier assumes a Halt tail (compile()'s tail simulation and
+///              the interpreter's exit); the decoder enforces it.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: negative case asserted inline.
     #[test]
     fn rejects_missing_halt() {
         assert_eq!(decode_vertex("x", &[1u8, 1u8]), Err(BytecodeError::NoHalt));
     }
 
+    /// CEP:WHAT: NaN constants canonicalize at decode time.
+/// CEP:WHY: The value representation bans non-canonical NaNs (doc/value.md);
+///              the decoder is the first canonicalization point.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: bit patterns asserted inline.
     #[test]
     fn canonicalizes_nan_constants() {
         let mut b = vec![22u8];

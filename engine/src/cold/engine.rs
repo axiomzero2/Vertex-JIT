@@ -31,8 +31,10 @@ use crate::cold::passes::{self, PassBudgets};
 use crate::cold::tier::{JitBudgets, Tier, TierThresholds};
 use crate::cold::tier0::{self, TemplateLibrary};
 use crate::hot::heap::Heap;
-use crate::hot::interp::{Exit, FnFrame, HostHooks, Interp, ProfileData, RunBudget};
-use crate::hot::runtime::{with_trampoline, TrampOutcome};
+use crate::hot::frame::FnFrame;
+use crate::hot::host::HostHooks;
+use crate::hot::interp::{Exit, Interp, ProfileData, RunBudget};
+use crate::hot::trap::{with_trampoline, TrampOutcome};
 use crate::hot::value::Value;
 use crate::platform::TargetConfig;
 
@@ -130,7 +132,7 @@ impl JitEngine {
         let cache = CodeCache::new(target, budgets.code_cache_bytes)?;
         let lib = TemplateLibrary::new(
             crate::hot::runtime::jit_fmod as *const () as usize,
-            crate::hot::runtime::jit_trap_div0 as *const () as usize,
+            crate::hot::trap::jit_trap_div0 as *const () as usize,
         );
         let n = funcs.len();
         Ok(JitEngine {
@@ -380,8 +382,8 @@ impl JitEngine {
             .collect();
         let helper = Helpers {
             fmod: crate::hot::runtime::jit_fmod as *const () as usize,
-            trap_div0: crate::hot::runtime::jit_trap_div0 as *const () as usize,
-            trap_bounds: crate::hot::runtime::jit_trap_bounds as *const () as usize,
+            trap_div0: crate::hot::trap::jit_trap_div0 as *const () as usize,
+            trap_bounds: crate::hot::trap::jit_trap_bounds as *const () as usize,
             alloc: crate::hot::runtime::jit_alloc as *const () as usize,
             store_elem: crate::hot::runtime::jit_store_elem as *const () as usize,
             load_elem: crate::hot::runtime::jit_load_elem as *const () as usize,
@@ -499,7 +501,7 @@ impl JitEngine {
                 // Cross-frame deopt (trap inside a machine-called callee)
                 // is documented as pending (ticket CEP-ENGINE-013); the
                 // single-frame case deopts exactly.
-                if !crate::hot::runtime::is_single_machine_frame(&state) {
+                if !crate::hot::trap::is_single_machine_frame(&state) {
                     return Err(EngineError::DeoptFailed(
                         "cross-frame deopt pending; ticket CEP-ENGINE-013",
                     ));
@@ -520,7 +522,7 @@ impl JitEngine {
                 // Allocation failures retry through the interpreter's
                 // GcNeeded path (collect-and-retry).
                 self.stats.alloc_deopts +=
-                    u64::from(state.kind == crate::hot::runtime::TrapKind::BoundsCheck);
+                    u64::from(state.kind == crate::hot::trap::TrapKind::BoundsCheck);
                 // The deopted function continues in the interpreter; the
                 // tier counters will re-compile it later (spec 6.3).
                 self.tiers[fn_id as usize] = Tier::Interp;
@@ -613,8 +615,8 @@ impl JitEngine {
         }
         let helper = Helpers {
             fmod: crate::hot::runtime::jit_fmod as *const () as usize,
-            trap_div0: crate::hot::runtime::jit_trap_div0 as *const () as usize,
-            trap_bounds: crate::hot::runtime::jit_trap_bounds as *const () as usize,
+            trap_div0: crate::hot::trap::jit_trap_div0 as *const () as usize,
+            trap_bounds: crate::hot::trap::jit_trap_bounds as *const () as usize,
             alloc: crate::hot::runtime::jit_alloc as *const () as usize,
             store_elem: crate::hot::runtime::jit_store_elem as *const () as usize,
             load_elem: crate::hot::runtime::jit_load_elem as *const () as usize,

@@ -2,7 +2,9 @@
 
 ## Abstract
 
-`engine/src/cold/passes.rs` implements the versioned pass pipeline. Tiers
+`engine/src/cold/passes/` implements the versioned pass pipeline — one
+pass per module (chapter 62.3.1), with `mod.rs` carrying the pipeline
+constants and the name dispatcher. Tiers
 select pipelines by name: T1 runs const-fold, local-vn, if-fold, phi-simp,
 dce; T2 adds gvn, licm, pea; T3 runs the full pipeline including unroll and
 vectorization gates. Every pass is a function over `(Graph, DeoptSites)`

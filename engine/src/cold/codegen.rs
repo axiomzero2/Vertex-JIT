@@ -32,7 +32,7 @@
 
 use crate::cold::errors::EngineError;
 use crate::cold::ir::{DeoptSite, Graph, NodeId, NodeKind, VType};
-use crate::cold::tier0::{Cc, Emitter, Label};
+use crate::cold::tier0_emit::{Cc, Emitter, Label};
 use crate::hot::value::{TypeTag, PAYLOAD_MASK};
 
 /// Slots per vector value (f64 lanes for AVX2).
@@ -348,6 +348,15 @@ fn vtype_to_tag(t: VType) -> TypeTag {
 }
 
 /// Find the IfTrue projection of an If.
+/// CEP:WHAT: IfTrue projection lookup for branch emission.
+/// CEP:WHY: Codegen lowers If nodes by emitting the truthy side first; the
+///              projection identifies that control edge.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: falls back to the If node when no IfTrue projection
+///              exists (callers handle the miss).
+/// CEP:ASSUMES: the graph passed ir::verify.
+/// CEP:COST: O(n) scan.
+/// CEP:EVIDENCE: tests/differential.rs branch programs.
 fn proj_true(g: &Graph, ifn: NodeId) -> NodeId {
     for (i, n) in g.nodes.iter().enumerate() {
         if n.kind == NodeKind::IfTrue && n.inputs.first() == Some(&ifn) {

@@ -32,7 +32,9 @@ Stack discipline: binary templates collapse their operand pair in place
 template that pushed its result instead would leak sixteen bytes per
 execution and overflow the machine stack inside loops; the golden test
 `golden_compare_templates_collapse_operand_pair` pins the bytes and matrix A
-in `tests/stack_discipline.rs` pins the behavior.
+in `tests/stack_discipline/` (matrices A/B/C) pins the behavior. The
+byte emitter lives in `tier0_emit.rs`, the legality checker in
+`tier0_check.rs`, the golden-byte lockfiles in `tier0_tests.rs`.
 
 ## Invariants
 

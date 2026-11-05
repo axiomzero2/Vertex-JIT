@@ -21,10 +21,18 @@ use vertex_jit::cold::bytecode::{decode_vertex, Function};
 use vertex_jit::cold::engine::JitEngine;
 use vertex_jit::cold::errors::EngineError;
 use vertex_jit::cold::tier::{JitBudgets, Tier};
-use vertex_jit::hot::interp::HostHooks;
+use vertex_jit::hot::host::HostHooks;
 use vertex_jit::platform::TargetConfig;
 
 /// Build an engine for one program with all tiers forced for `fn_id`.
+/// CEP:WHAT: Build a one-function engine pinned to one tier.
+/// CEP:WHY: Differential runs need identical construction across tiers so
+///              only the tier differs.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: returns EngineError from decode or construction.
+/// CEP:ASSUMES: TargetConfig::detect() succeeds.
+/// CEP:COST: one engine build.
+/// CEP:EVIDENCE: every differential test routes through it.
 fn engine_for(name: &str, bytes: &[u8], tier: Tier) -> Result<JitEngine, EngineError> {
     let func = decode_vertex(name, bytes)?;
     let mut e = JitEngine::new(vec![func], &TargetConfig::detect()?, JitBudgets::default())?;
@@ -33,6 +41,14 @@ fn engine_for(name: &str, bytes: &[u8], tier: Tier) -> Result<JitEngine, EngineE
 }
 
 /// Assemble a small program: PUSH_NUMB a, PUSH_NUMB b, OP, HALT.
+/// CEP:WHAT: Two-operand arithmetic program builder.
+/// CEP:WHY: The differential suite exercises the shared opcodes with a
+///              minimal canonical shape.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none (pure construction).
+/// CEP:ASSUMES: opcode bytes are production opcodes.
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: arithmetic/comparison tests use it.
 fn program(op: u8, a: f32, b: f32) -> Vec<u8> {
     let mut v = vec![22u8];
     v.extend_from_slice(&a.to_le_bytes());
@@ -43,6 +59,13 @@ fn program(op: u8, a: f32, b: f32) -> Vec<u8> {
     v
 }
 
+/// CEP:WHAT: Run one program on one tier and return the exit value.
+/// CEP:WHY: Parity needs the raw per-tier result without engine wrappers.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: returns EngineError from decode or run.
+/// CEP:ASSUMES: the program halts with one value on the stack.
+/// CEP:COST: one run.
+/// CEP:EVIDENCE: assert_same drives it for every case.
 fn run_tier(name: &str, bytes: &[u8], tier: Tier) -> Result<Option<vertex_jit::hot::value::Value>, EngineError> {
     let mut e = engine_for(name, bytes, tier)?;
     let exit = e.run(0, &HostHooks::stdio())?;
@@ -56,6 +79,14 @@ fn run_tier(name: &str, bytes: &[u8], tier: Tier) -> Result<Option<vertex_jit::h
     })
 }
 
+/// CEP:WHAT: Bit-exact parity across Interp and all four tiers.
+/// CEP:WHY: The engine's core correctness claim: every tier agrees with the
+///              interpreter on every value, including NaN shapes.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics naming the case, the tier and both values.
+/// CEP:ASSUMES: the interpreter is the reference semantics.
+/// CEP:COST: five runs per case.
+/// CEP:EVIDENCE: every differential test drives it.
 fn assert_same(name: &str, bytes: &[u8]) {
     let interp = run_tier(name, bytes, Tier::Interp).expect("interp run");
     for tier in [Tier::T0, Tier::T1, Tier::T2, Tier::T3] {
@@ -72,6 +103,14 @@ fn assert_same(name: &str, bytes: &[u8]) {
     }
 }
 
+/// CEP:WHAT: Arithmetic opcodes agree across all five tiers.
+/// CEP:WHY: Add/Sub/Mul/Div/Mod are the core of every tier; parity here is
+///              the base guarantee.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: assert_same over the op table.
 #[test]
 fn differential_arithmetic() {
     for (name, op, a, b) in [
@@ -85,6 +124,14 @@ fn differential_arithmetic() {
     }
 }
 
+/// CEP:WHAT: Comparison opcodes agree across all five tiers.
+/// CEP:WHY: Lt/Gt/Eq produce bool words; the compare templates' in-place
+///              collapse must match the interpreter's model.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: assert_same over the compare table; matrix A for depth.
 #[test]
 fn differential_comparisons() {
     for (name, op, a, b) in [
@@ -97,6 +144,14 @@ fn differential_comparisons() {
     }
 }
 
+/// CEP:WHAT: Divide-by-zero traps identically on every tier.
+/// CEP:WHY: The trap path crosses tiers (template guard vs interpreter
+///              check); parity must hold on the failure path too.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: trap assertions inline; tests/t0_exec.rs covers T0.
 #[test]
 fn differential_division_by_zero_all_tiers() {
     // The interpreter errors with DivideByZero; compiled tiers trap to the
@@ -113,6 +168,14 @@ fn differential_division_by_zero_all_tiers() {
     }
 }
 
+/// CEP:WHAT: The loop program runs identically on every tier.
+/// CEP:WHY: Loops exercise back edges, the compare templates in loop heads
+///              and profile-based promotion — the deepest parity case.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: final-value assertions inline across tiers.
 #[test]
 fn differential_loop_program() {
     use vertex_jit::cold::bytecode::{Function, Insn, Operand, Opcode as Op};
@@ -159,6 +222,13 @@ fn differential_loop_program() {
 /// CEP:COST: offline.
 /// CEP:EVIDENCE: differential suite.
 /// CEP:SECURITY: test-authored.
+/// CEP:WHAT: Run a prebuilt Function on one tier.
+/// CEP:WHY: Loop tests need multi-instruction Functions without re-decoding.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: None when the run traps or exits without a value.
+/// CEP:ASSUMES: the function halts.
+/// CEP:COST: one run.
+/// CEP:EVIDENCE: loop and constant tests route through it.
 fn run_function(f: &Function, tier: Tier) -> Option<vertex_jit::hot::value::Value> {
     let mut e = JitEngine::new(
         vec![f.clone()],
@@ -177,12 +247,28 @@ fn run_function(f: &Function, tier: Tier) -> Option<vertex_jit::hot::value::Valu
     }
 }
 
+/// CEP:WHAT: Negative and large constants decode and execute identically.
+/// CEP:WHY: f32->f64 widening at decode is a classic parity hazard; the
+///              constants pin it.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: value assertions inline.
 #[test]
 fn differential_negative_and_large_constants() {
     assert_same("neg", &program(1, -12.5f32, 3.25f32));
     assert_same("big", &program(4, 1.0e18f32, 2.0f32));
 }
 
+/// CEP:WHAT: NaN-producing arithmetic canonicalizes identically per tier.
+/// CEP:WHY: 0/0 and inf-inf produce hardware NaNs that must hit the value
+///              representation's canonical pattern on every tier.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics on mismatch (the assertion is the failure path)
+/// CEP:ASSUMES: none
+/// CEP:COST: offline
+/// CEP:EVIDENCE: bit-pattern assertions inline.
 #[test]
 fn differential_nan_canonicalization() {
     // NaN constants are canonicalized at decode; every tier must keep the

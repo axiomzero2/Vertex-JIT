@@ -23,8 +23,9 @@
 
 use crate::cold::codegen::{CompiledCode, DeoptRecord};
 use crate::cold::errors::EngineError;
-use crate::hot::interp::{FnFrame, Interp};
-use crate::hot::runtime::TrapState;
+use crate::hot::frame::FnFrame;
+use crate::hot::interp::Interp;
+use crate::hot::trap::TrapState;
 use crate::hot::value::Value;
 
 /// Rebuild an interpreter frame from a machine frame at a trap site.
