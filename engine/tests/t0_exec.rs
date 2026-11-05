@@ -157,8 +157,9 @@ fn t0_locals_and_loop() {
 #[test]
 fn t0_compile_latency_under_budget() {
     // Spec 2.1: T0 compiles in under 5 us per function. Measure a
-    // 64-instruction program and assert the budget with generous slack for
-    // CI noise (documented in benches/EVIDENCE.md).
+    // 64-instruction program and assert the mean against the raw budget in
+    // release builds; debug builds carry the documented 100x slack.
+    // Methodology and recorded numbers live in benches/EVIDENCE.md.
     let mut code = Vec::new();
     for _ in 0..32 {
         code.push(Insn { op: Op::PushNumber, operand: Operand::F64(2.0) });

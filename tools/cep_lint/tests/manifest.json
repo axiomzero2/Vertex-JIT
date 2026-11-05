@@ -278,6 +278,30 @@
           "count": 2
         }
       ]
+    },
+    {
+      "name": "naming_type_enum_class_clean",
+      "files": [
+        "cases/enum_class_clean.cpp"
+      ],
+      "expect": [
+        {
+          "rule": "CEP-LINT-NAMING-TYPE",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "name": "naming_type_enum_class_bad",
+      "files": [
+        "cases/enum_class_bad.cpp"
+      ],
+      "expect": [
+        {
+          "rule": "CEP-LINT-NAMING-TYPE",
+          "count": 4
+        }
+      ]
     }
   ]
 }

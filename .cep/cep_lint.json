@@ -205,7 +205,7 @@
     "CEP-LINT-NAMING-TYPE": {
       "severity": 2,
       "check": "flat_code_regex",
-      "pattern": "\\b((struct|class|enum\\s+class|enum\\s+struct|enum)\\s+(\\w+_\\w*|[a-z]\\w*)\\b|using\\s+(\\w+_\\w*|[a-z]\\w*)\\s*=)",
+      "pattern": "\\b((struct|class|enum(\\s+(class|struct))?)\\s+(?!class\\b|struct\\b)(\\w+_\\w*|[a-z]\\w*)\\b|using\\s+(\\w+_\\w*|[a-z]\\w*)\\s*=)",
       "line_group": "2"
     },
     "CEP-LINT-NAMING-FUNC": {

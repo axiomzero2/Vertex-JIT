@@ -49,11 +49,13 @@ in `tests/stack_discipline.rs` pins the behavior.
 
 ## Integration Points
 
-`check_legality` is the gate: it runs a dataflow over the bytecode and
-rejects programs outside the subset (type-conflicting merges, shadowing
-stores, unbound drops, stack deeper than the maximum). Refused programs stay
-on the interpreter. The engine calls `tier0::compile` at tier selection and
-publishes through the code cache.
+`check_legality` is the gate: it runs a worklist dataflow over the bytecode
+and rejects programs outside the subset (type-conflicting merges, shadowing
+stores, unbound drops, stack deeper than the maximum, slot operands beyond
+the locals frame). Each pc is enqueued once and visited once; abstract
+states are fixed-capacity `Copy` values, so a visit performs no allocation.
+Refused programs stay on the interpreter. The engine calls `tier0::compile`
+at tier selection and publishes through the code cache.
 
 ## Known Limitations
 
@@ -61,5 +63,7 @@ publishes through the code cache.
    restore an outer binding.
 2. Function-like macro logic and self-modifying patterns are out of scope;
    the template set is closed.
-3. Compile latency is asserted with generous slack; the budget lives in
-   `tests/t0_exec.rs` and benches/EVIDENCE.md records measurements.
+3. Compile latency is asserted against the raw 5 us budget in release
+   builds and with 100x slack in debug builds; the budget lives in
+   `tests/t0_exec.rs` and benches/EVIDENCE.md records measurements and the
+   enforcement history.

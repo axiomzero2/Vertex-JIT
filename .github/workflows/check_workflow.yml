@@ -58,9 +58,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-      - name: cargo test (engine)
+      - name: cargo test (engine, debug)
         working-directory: engine
         run: cargo test --all-features
+      - name: cargo test (engine, release — enforces the spec 2.1 T0 latency budget)
+        working-directory: engine
+        run: cargo test --release --all-features
       - name: cargo clippy (engine)
         working-directory: engine
         run: cargo clippy --all-targets --all-features -- -D warnings
