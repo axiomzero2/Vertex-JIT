@@ -1,18 +1,27 @@
 
-# CEP&CC 0.3
+# CEP&CC 0.4
 
 ## Cycle-Exact Performance & Clean Code
 
 ### Psychopathic Tier
 
 Target dialect: **C++26**  
-Version: **0.3**  
+Version: **0.4**  
 Status: **Draft standard**  
 ---
 
+## Revision history
+
+**0.3 (2026-11-05).** Enforcement-completeness revision; no existing rule's detection semantics changed.
+
+- Chapter 50's DOC-SYNC contract is now mechanical in BOTH coverage directions: a rule documented in the chapter but absent from the configuration is a lint failure, and the document's `Version:` line must equal the configuration's `standard.version`. The previous any-line version pattern was satisfiable by stale cross-references elsewhere in this document and had silently drifted (the configuration enforced `CEP&CC 0.1` while this document was already 0.2).
+- `CEP-LINT-MACRO-PREFIX` is configured and enforced; it was documented in 50.3 but shipped unconfigured. In Rust sources, `macro_rules!` definitions are the object-like macro analog of `#define` and obey the same name and guard patterns.
+- The `--self-test` manifest (`tools/cep_lint/tests/manifest.json`, 50.6 item 3) and the `--version` tool-and-standard banner (50.1) are implemented; the manifest ships one violating and one compliant scenario per configured rule with exact expected finding counts.
+- Applicability: the mechanical comment-discipline rules apply to the first-party source dialects declared by the configuration's `file_globs`. In this repository that is the Rust tree; C++-specific constructs map to their Rust analogs (macro definitions per the MACRO-PREFIX rule, include guards per its guard pattern).
+
 # 1. Purpose
 
-CEP&CC 0.3 is a coding standard for C++26 codebases that require both of the following properties simultaneously:
+CEP&CC 0.4 is a coding standard for C++26 codebases that require both of the following properties simultaneously:
 
 1. **Cycle-exact performance discipline**  
    Performance is treated as a correctness requirement, not as a vague goal.
@@ -12032,7 +12041,7 @@ Every rule below is a key in `.cep/cep_lint.json` under `rules` and must have a 
 
 **Severity 1. Sections: 35, 10.2. Check: `comment_block_schema` (file header mode).**
 
-Every first-party `.cpp` and `.hpp` file must begin with a CEP file header block containing `CEP:FILE`, `CEP:WHAT`, `CEP:WHY`, `CEP:CLASS`, `CEP:STATUS`, `CEP:FAILURE`, `CEP:ASSUMES`, `CEP:COST`, and `CEP:EVIDENCE`. The declared class must be one of the defined conformance classes (`CEP-0`, `CEP-1`, `CEP-2`, `CC`, `FFI`, `HPC-0`, `HPC-1`, `HPC-2`, `RCS-0`, `RCS-1`, `RCS-2`).
+Every first-party source file in the configured dialects must begin with a CEP file header block containing `CEP:FILE`, `CEP:WHAT`, `CEP:WHY`, `CEP:CLASS`, `CEP:STATUS`, `CEP:FAILURE`, `CEP:ASSUMES`, `CEP:COST`, and `CEP:EVIDENCE`. For C++ the first-party dialects are `.cpp` and `.hpp`; a consuming repository declares its first-party set through the configuration's `file_globs` (this repository's is the Rust tree, per the 0.3 applicability note). The declared class must be one of the defined conformance classes (`CEP-0`, `CEP-1`, `CEP-2`, `CC`, `FFI`, `HPC-0`, `HPC-1`, `HPC-2`, `RCS-0`, `RCS-1`, `RCS-2`).
 
 Parameters: `max_start_line`, `required_fields`, `class_field`, `allowed_classes`.
 
@@ -12102,11 +12111,11 @@ Limits: the exemption context is the joined statement text, bounded to twelve li
 
 **Severity 2. Sections: 33.16, 8.4. Check: `macro_prefix_policy`.**
 
-Object-like macro names must match the `CEP_` prefix pattern or the include-guard pattern. All other macro definitions are violations.
+Object-like macro names must match the `CEP_` prefix pattern or the include-guard pattern. All other macro definitions are violations. In Rust sources, `macro_rules! NAME` definitions are the object-like macro analog of `#define NAME` and obey the same patterns (0.3 applicability note).
 
 Parameters: `name_pattern`, `guard_pattern`.
 
-Limits: function-like macro logic is banned by section 8.4 but is not yet detected mechanically; review remains required.
+Limits: function-like macro logic is banned by section 8.4 but is not yet detected mechanically; review remains required. The prefix check applies to the defined NAME of a function-like definition as well; only `#undef` and macro use sites are outside the check.
 
 ### Rule CEP-LINT-HOT-BANNED
 
@@ -12235,6 +12244,8 @@ A change to the tool, the configuration, or this chapter is compliant only if al
 5. `CEP-LINT-DOC-SYNC` passes, proving this chapter and `.cep/cep_lint.json` agree.
 
 Adding or changing a rule requires updating the configuration and this chapter in the same change; the tool refuses the split.
+
+For the Rust implementation of the tool in this repository, the equivalents are: `cargo build`/`cargo clippy -- -D warnings` over the workspace (the 6.3 warning set as errors), `cargo test -p cep_lint` (the unit and integration suites), `cep_lint --self-test` over `tools/cep_lint/tests/manifest.json` (item 3 unchanged), and the live DOC-SYNC gate over this chapter and `.cep/cep_lint.json` (item 5 unchanged). Sanitizer coverage is provided by the CI's determinism, budget, and reproducible-build gates.
 ---
 
 # 51. Research, Generative Optimization, and Autotuning (RCO)
@@ -14048,4 +14059,268 @@ Reason: Top-level fuzzing dilutes the corpus. The vectorizer requires targeted I
 Rule: CEP&CC 61.2.2
 Action: Write a targeted harness that injects 1,000,000 mutated SSA IR graphs directly into the vectorizer, bypassing the parser.
 ```
+---
+
+# 62. Atomic File Topology and Extreme Separation of Concerns
+This chapter extends CEP&CC for the physical organization of source code, translation units, and repository topology. 
+
+Modern codebases rot from the inside out because developers treat files as "containers" for related text. They create 10,000-line "god files" that mash together unrelated optimization passes, entangle multiple target backends, and hide instruction selection logic inside a labyrinth of `switch` statements. This is unacceptable. 
+
+A file is not a container. A file is an **atomic unit of compilation, review, ownership, and mechanical enforcement**. If a file contains multiple unrelated concepts, it is a lie. It claims to be a translation unit, but it is actually a landfill.
+
+Where this chapter is stricter than Chapter 32 (File Structure), this chapter wins.
+
+---
+
+## 62.1 The Prime Directive: The Atomic File Mandate
+> **Every file must do exactly one thing.**
+> **Every file must have exactly one reason to change.**
+> **Every file must be reviewable in a single sitting without context-switching.**
+> **Giant files where everything is mashed together are a Severity 0 defect.**
+
+The "Single Responsibility Principle" does not just apply to functions or classes; it applies to the **file itself**. 
+If a reviewer must scroll past 4,000 lines of unrelated code to understand the memory aliasing logic in an optimization pass, the file structure has failed.
+
+### 62.1.1 The "One Thing" Rule
+A translation unit (`.cpp`, `.cc`, `.rs`, `.zig`) and its corresponding interface/header (`.cppm`, `.hpp`, `.h`) must encapsulate **exactly one** of the following:
+- One optimization pass.
+- One instruction selection pattern or class.
+- One target architecture backend (or a strictly partitioned sub-component of it).
+- One IR node definition and its immediate operations.
+- One data structure and its direct invariants.
+- One hardware abstraction or peripheral driver.
+
+### 62.1.2 Banned File Patterns
+- **The "God File":** A file exceeding 800 lines of code (LOC) that contains multiple distinct logical components.
+- **The "Pass Landfill":** A file like `loop_passes.cpp` that contains LICM, loop unrolling, and loop fusion.
+- **The "Target Monolith":** A file like `x86_backend.cpp` that contains register allocation, instruction selection, and scheduling.
+- **The "Junk Drawer":** Files named `utils.cpp`, `helpers.h`, `common.rs`, or `misc.cpp`.
+
+---
+
+## 62.2 Repository Topology by Project Scale
+Repository structure must scale with the complexity of the system. A small library does not need a 40-directory monorepo, but a multi-target compiler requires strict domain isolation.
+
+### 62.2.1 Scale 1: Small (Libraries, Utilities, Single-Purpose Tools)
+**Structure:** Flat but logically separated.
+```text
+src/
+├── hot/
+│   ├── decoder.cpp / decoder.hpp
+│   └── checksum.cpp / checksum.hpp
+├── cold/
+│   └── config.cpp / config.hpp
+└── target/
+    └── generic.cpp / generic.hpp
+```
+**Rule:** Even in small projects, hot and cold code must not share a file. One concept per file.
+
+### 62.2.2 Scale 2: Medium (Single Compiler, Game Engine, RTOS)
+**Structure:** Layered by concern, then by component.
+```text
+src/
+├── ir/
+│   ├── node_def.cpp        # IR node definitions
+│   └── verifier.cpp        # IR verification pass
+├── passes/
+│   ├── licm/
+│   │   ├── licm.cpp        # ONLY Loop Invariant Code Motion
+│   │   └── licm.hpp
+│   └── sroa/
+│       ├── sroa.cpp        # ONLY Scalar Replacement of Aggregates
+│       └── sroa.hpp
+├── targets/
+│   ├── arm64/
+│   │   ├── isa.cpp         # Arm64 instruction definitions
+│   │   ├── isel.cpp        # Arm64 instruction selection
+│   │   └── regalloc.cpp    # Arm64 register allocation
+│   └── x86_64/
+│       ├── isa.cpp
+│       ├── isel.cpp
+│       └── regalloc.cpp
+```
+
+### 62.2.3 Scale 3: Large (Multi-Target, Multi-Frontend Compiler Monorepo)
+**Structure:** Strict domain boundaries, isolated translation units, feature-partitioned targets.
+```text
+src/
+├── frontend/
+│   ├── c/
+│   └── rust/
+├── middle_end/
+│   ├── ir/
+│   ├── analysis/
+│   │   ├── alias_analysis.cpp
+│   │   └── dependence_analysis.cpp
+│   └── transforms/
+│       ├── vectorization/
+│       │   ├── slp.cpp
+│       │   └── loop_vec.cpp
+│       └── scalar/
+│           ├── dce.cpp
+│           └── sccp.cpp
+├── backends/
+│   ├── arm64/
+│   │   ├── isel/
+│   │   │   ├── arithmetic.cpp   # ONLY arithmetic ISEL
+│   │   │   ├── memory.cpp       # ONLY load/store ISEL
+│   │   │   └── simd.cpp         # ONLY SIMD ISEL
+│   │   ├── schedule/
+│   │   └── emit/
+```
+
+---
+
+## 62.3 Compiler and Toolchain Topology Rules
+For compilers, linkers, and IR transformers (HPC/CEP-0), the separation of concerns is a correctness requirement. Mashed-together files hide illegal transformations and break determinism.
+
+### 62.3.1 One Optimization Pass Per File
+An optimization pass is a distinct transformation with its own legality conditions, analyses, and invalidations. 
+- **Banned:** Grouping passes by "phase" (e.g., `early_opt.cpp`, `late_opt.cpp`).
+- **Required:** One pass per file. The file name must match the pass name.
+- **Example:** `src/passes/licm.cpp` contains *only* LICM. If you need to add loop fusion, it goes in `src/passes/loop_fusion.cpp`.
+
+### 62.3.2 One Target Per Directory, Subdivided by Concern
+A target backend is not a single file. It is a collection of distinct hardware-mapping concerns.
+- **Banned:** `target_arm64.cpp` (5,000 lines).
+- **Required:** The target directory must be subdivided by concern:
+  - `isel/` (Instruction Selection)
+  - `regalloc/` (Register Allocation)
+  - `schedule/` (Instruction Scheduling)
+  - `emit/` (Object Emission / Relocations)
+
+### 62.3.3 Instruction Selection Partitioning
+Instruction selection (ISEL) is the most complex part of a backend. If a target has more than 300 instructions, the ISEL **must** be partitioned by instruction class.
+- **Example:** 
+  - `isel/arithmetic.cpp` (ADD, SUB, MUL, DIV)
+  - `isel/memory.cpp` (LOAD, STORE, FENCE)
+  - `isel/control_flow.cpp` (BR, CALL, RET)
+  - `isel/simd.cpp` (VADD, VLOAD, etc.)
+- **Extermination:** A single `isel.cpp` file containing a 2,000-line `switch` statement over opcode enums is **exterminated**.
+
+---
+
+## 62.4 The Ban on "Junk Drawers" and "Utils"
+Files named `utils`, `helpers`, `common`, `misc`, or `tools` are a Severity 1 defect. They are where dead code, hidden allocations, and unmaintained assumptions go to hide.
+
+### 62.4.1 The Rule of Explicit Naming
+Every function must live in a file named after the **domain** it serves, not the **mechanism** it uses.
+- **Bad:** `string_utils.cpp` (Contains string hashing, string splitting, and string formatting).
+- **Good:** `string_hash.cpp`, `string_split.cpp`, `string_format.cpp`.
+- **Bad:** `math_helpers.h`
+- **Good:** `simd_math.h`, `scalar_fallback.h`
+
+### 62.4.2 The "Three Strike" Eviction
+If a "utility" file contains more than three unrelated functions, it must be shattered. The functions must be moved to the domain-specific files that actually use them. If no domain uses them, they are dead code and must be **exterminated**.
+
+---
+
+## 62.5 Mechanical File Limits and Enforcement
+Clean code cannot be enforced by vibes. It must be enforced by `cep_lint` and CI gates.
+
+### 62.5.1 Hard File Size Limits
+Files that are too large are, by definition, mashed together.
+- **CEP-0 (Hot Code):** Maximum **400 lines** per translation unit.
+- **CEP-1 (Cold Code):** Maximum **800 lines** per translation unit.
+- **CEP-2 (Tooling):** Maximum **1,200 lines** per translation unit.
+*Exception:* Generated code (e.g., opcode tables) is exempt from line limits but must be generated by a deterministic tool.
+
+### 62.5.2 Symbol Density Limits
+- **Maximum 1 primary public class/struct** per header/module interface.
+- **Maximum 1 optimization pass registration** per `.cpp` file.
+- **Maximum 1 target backend entry point** per `.cpp` file.
+
+### 62.5.3 `cep_lint` Rule: CEP-LINT-ATOMIC-FILE
+**Severity 1. Check: `file_topology_policy`.**
+The linter must enforce:
+1. File line counts do not exceed the class limits.
+2. Files named `*util*`, `*helper*`, `*misc*`, `*common*` are rejected.
+3. A single `.cpp` file in `src/passes/` does not register more than one pass.
+4. A single `.cpp` file in `src/targets/*/isel/` does not contain more than one instruction class category (detected via comment tags or namespace structure).
+
+---
+
+## 62.6 Extermination Examples (The Atomic File Protocol)
+
+### Example 1: The "Pass Landfill"
+**Violation:**
+```cpp
+// src/passes/loop_optimizations.cpp
+void run_licm(IR& ir) { ... } // 400 lines
+void run_loop_unroll(IR& ir) { ... } // 300 lines
+void run_loop_fusion(IR& ir) { ... } // 500 lines
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: File contains three distinct optimization passes. Violates the "One Pass Per File" mandate. Hides pass-specific legality conditions and analysis invalidations.
+Rule: CEP&CC 62.3.1
+Action: Shatter into src/passes/licm.cpp, src/passes/loop_unroll.cpp, and src/passes/loop_fusion.cpp.
+```
+
+### Example 2: The "Target Monolith"
+**Violation:**
+```cpp
+// src/targets/arm64.cpp
+// 8,000 lines of Arm64 backend code.
+// Contains ISEL, Register Allocation, Scheduling, and Emit.
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Giant file mashing together unrelated target concerns. A reviewer cannot audit the register allocator when it is buried inside instruction selection.
+Rule: CEP&CC 62.3.2
+Action: Create src/targets/arm64/isel/, src/targets/arm64/regalloc/, etc.
+```
+
+### Example 3: The "Junk Drawer"
+**Violation:**
+```cpp
+// src/utils/common_helpers.cpp
+uint32_t hash_string(string_view s) { ... }
+void log_error(error_code e) { ... }
+bool is_prime(int n) { ... }
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: "Utils" file violates the ban on junk drawers. Hashing, logging, and math have no business sharing a translation unit.
+Rule: CEP&CC 62.4
+Action: Move hash_string to src/cold/hash.cpp. Move log_error to src/cold/diagnostics.cpp. Delete is_prime if unused, or move to src/cold/math.cpp.
+```
+
+### Example 4: The "Mega ISEL"
+**Violation:**
+```cpp
+// src/targets/x86_64/isel.cpp
+Instruction select(Node* n) {
+    switch(n->opcode) {
+        case OP_ADD: ...
+        case OP_VADD: ...
+        case OP_LOAD: ...
+        // 3,000 more cases...
+    }
+}
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Monolithic instruction selection. Guarantees merge conflicts, hides port-contention logic, and prevents independent measurement of scalar vs. SIMD selection.
+Rule: CEP&CC 62.3.3
+Action: Partition into isel/scalar_arithmetic.cpp, isel/simd.cpp, isel/memory.cpp.
+```
+
+---
+
+## 62.7 Atomic File Review Checklist
+A repository topology is compliant only if:
+- [ ] No file exceeds the line-count limit for its CEP class.
+- [ ] No file contains more than one optimization pass.
+- [ ] No file contains more than one primary target concern (ISEL, RegAlloc, Schedule).
+- [ ] No files named `utils`, `helpers`, `misc`, or `common` exist.
+- [ ] Instruction selection is partitioned by instruction class for complex targets.
+- [ ] Every file has exactly one `CEP:WHAT` that describes a single, atomic concept.
+- [ ] Include graphs are minimal; files do not include headers they don't strictly need.
+- [ ] Merge conflicts are localized to the single atomic component being changed.
+
 ---
