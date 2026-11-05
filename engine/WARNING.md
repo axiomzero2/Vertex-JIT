@@ -1,6 +1,6 @@
 # Engine Notice
 
-consult axiomzero2 before touching, this is sensitive, and will break easily. discord is axiomzero0 on the vertex server
+Consult axiomzero2 before touching, this is sensitive, and will break easily. discord is axiomzero0 on the vertex server
 
 ## Scope of this directory
 
