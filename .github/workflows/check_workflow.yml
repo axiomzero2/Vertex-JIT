@@ -84,7 +84,7 @@ jobs:
         run: tools/cep_lint/build/cep_lint --self-test
       - name: self-lint gate
         run: tools/cep_lint/build/cep_lint tools/cep_lint/src
-      - name: first-party scan (file_globs: the Rust tree, DOC-SYNC included)
+      - name: first-party scan (file_globs applicability - the Rust tree, DOC-SYNC included)
         run: tools/cep_lint/build/cep_lint
       - name: sanitizer self-test
         run: |
