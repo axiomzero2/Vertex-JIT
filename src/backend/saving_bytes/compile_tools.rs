@@ -66,9 +66,10 @@ pub fn compile_file_to_bytecode(
     /*
      * AST Retrieval
      */
+    let missing_module = format!("AST missing for module: {module_name}");
     let mut parsed_ast = parsed_files
         .get(&module_name)
-        .unwrap_or_else(|| panic!("AST missing for module: {}", module_name))
+        .expect(&missing_module)
         .clone();
 
     /*
@@ -115,14 +116,14 @@ pub fn compile_file_to_bytecode(
 }
 
 async fn lex_project_parallel(
-    dir: &String,
-    main_vtx_files: &Vec<String>,
+    dir: &str,
+    main_vtx_files: &[String],
 ) -> HashMap<String, Vec<Token>> {
     let mut files_to_lex = Vec::new();
 
     // Add main project files
     for file in main_vtx_files {
-        files_to_lex.push((file.clone(), dir.clone(), None));
+        files_to_lex.push((file.clone(), dir.to_owned(), None));
     }
 
     // Add dependency files
@@ -142,8 +143,8 @@ async fn lex_project_parallel(
 
     for (file, base_dir, prefix) in files_to_lex {
         lexer_join_set.spawn(async move {
-            let content =
-                fs::read_to_string(&file).unwrap_or_else(|_| panic!("Cannot find module {}", file));
+            let missing = format!("Cannot find module {file}");
+            let content = fs::read_to_string(&file).expect(&missing);
             let abs_path = fs::canonicalize(&file).unwrap_or_else(|_| PathBuf::from(&file));
             let main_lexer: Lexer = Lexer::new(content.clone(), abs_path); // pass file path
             // also so that Lexer can have also have the file that was generating error.
@@ -207,7 +208,7 @@ async fn parse_project_parallel(
         let (file_name, parsed_file) = res.unwrap();
         match parsed_file {
             Err(e) => {
-                println!("Error at {}:", &file_name);
+                println!("Error at {}:", file_name);
                 println!("\x1b[1;31m{}\x1b[0m", e);
                 process::exit(-2);
             }

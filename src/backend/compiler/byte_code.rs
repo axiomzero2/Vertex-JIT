@@ -134,7 +134,7 @@ impl Compiler {
                     ComptimeVariable {
                         value_type: argument_type,
                         is_const: false,
-                        tag: format!("{}_{}", &argumet.name, &name),
+                        tag: format!("{}_{}", argumet.name, name),
                     },
                 )?;
             }

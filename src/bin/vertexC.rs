@@ -52,7 +52,7 @@ fn run_cli() -> Result<(), CommandLineError> {
             rt.block_on(build_prj(source.clone(), output.clone(), debug));
 
             println!("\n\x1b[1;32mRunning final bytecode\x1b[0m",);
-            run_code(&format!("out/{}", &output));
+            run_code(&format!("out/{}", output));
             Ok(())
         }
         "error" => {

@@ -67,15 +67,15 @@ $green|DESCRIPTION:$reset|
                     fs::create_dir(project_name)
                         .map_err(|_| CommandLineError::ErrorCreatingDirectory)?;
 
-                    fs::create_dir(format!("{}/src", &project_name))
+                    fs::create_dir(format!("{}/src", project_name))
                         .map_err(|_| CommandLineError::ErrorCreatingDirectory)?;
 
-                    let mut config = File::create(format!("{}/prj.toml", &project_name)).unwrap();
+                    let mut config = File::create(format!("{}/prj.toml", project_name)).unwrap();
 
                     config
-                        .write_all(format!("name = \"{}\"", &project_name).as_bytes())
+                        .write_all(format!("name = \"{}\"", project_name).as_bytes())
                         .unwrap();
-                    let mut main_file = File::create(format!("{}/src/main.vtx", &project_name))
+                    let mut main_file = File::create(format!("{}/src/main.vtx", project_name))
                         .map_err(|_| CommandLineError::ErrorCreatingFile)?;
 
                     main_file
