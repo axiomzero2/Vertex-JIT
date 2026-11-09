@@ -1,9 +1,8 @@
 // CEP:FILE: engine/src/cold/engine.rs
 // CEP:WHAT: The tiering engine driver: function table, per-function tier
-//           state, T0 copy-and-patch compilation and execution, the T1-T3
-//           pipeline compilation, the interpreter budget loop with OSR
-//           triggers, guard deoptimization, GC-retry integration and the
-//           documented statistics.
+//           state, the interpreter budget loop with OSR triggers, compiled
+//           execution, guard deoptimization, GC-retry integration and the
+//           documented statistics. Compilation lives in cold::compile.
 // CEP:WHY: Spec section 6: tier transitions at the documented thresholds;
 //          standard 38.39: budgets, W^X publication, deopt semantics.
 // CEP:CLASS: CEP-1
@@ -20,16 +19,17 @@
 //               engine-authored and published W^X; trap frames are
 //               validated before use.
 
-use crate::cold::bytecode::{Function, Opcode, StringPool};
+use crate::cold::bytecode::{Function, StringPool};
 use crate::cold::code_cache::CodeCache;
 use crate::cold::codegen::{self, Helpers};
 use crate::cold::deopt;
 use crate::cold::errors::EngineError;
 use crate::cold::gc;
-use crate::cold::ir::{self, LiftError};
+use crate::cold::ir;
 use crate::cold::passes::{self, PassBudgets};
+use crate::cold::compile::compute_arities;
 use crate::cold::tier::{JitBudgets, Tier, TierThresholds};
-use crate::cold::tier0::{self, TemplateLibrary};
+use crate::cold::tier0::TemplateLibrary;
 use crate::hot::heap::Heap;
 use crate::hot::frame::FnFrame;
 use crate::hot::host::HostHooks;
@@ -50,6 +50,10 @@ pub struct CompiledFn {
     pub code: codegen::CompiledCode,
     /// Static type of the returned word (typed decode, doc/value.md).
     pub return_tag: crate::hot::value::TypeTag,
+    /// Function-table id whose bytecode matches this code's pc and slot
+    /// space: fn_id itself, or the registered inlined image for a T3
+    /// merged compilation (deopt resumes there, doc/inline.md).
+    pub interp_fn: u32,
 }
 
 // SAFETY: base points into the engine's code cache; the cache owns the
@@ -67,6 +71,8 @@ pub struct EngineStats {
     pub osr_entries: u64,
     /// Allocation-failure deopts (collect-and-retry via the interpreter).
     pub alloc_deopts: u64,
+    /// Call sites inlined by T3 compilations (spec 5.2.1).
+    pub inlined_calls: u64,
 }
 
 /// The tiered JIT engine.
@@ -79,10 +85,12 @@ pub struct JitEngine {
     pub pool: StringPool,
     /// GC heap.
     pub heap: Heap,
-    /// Code cache (W^X, budgeted).
-    cache: CodeCache,
-    /// Frozen T0 template library.
-    lib: TemplateLibrary,
+    /// Code cache (W^X, budgeted). pub(super): the compilation unit
+    /// (cold::compile) publishes through it (file-topology split).
+    pub(super) cache: CodeCache,
+    /// Frozen T0 template library. pub(super): T0 compilation reads it
+    /// (cold::compile, file-topology split).
+    pub(super) lib: TemplateLibrary,
     /// Target configuration.
     pub target: TargetConfig,
     /// Tier thresholds.
@@ -95,6 +103,12 @@ pub struct JitEngine {
     pub tiers: Vec<Tier>,
     /// Compiled code per function (None while on the interpreter).
     pub compiled: Vec<Option<CompiledFn>>,
+    /// Maximum Call argc per function over the table (the call
+    /// convention's arity; doc/bytecode.md).
+    pub arities: Vec<u32>,
+    /// Registered inlined image per function (T3 merged body; None when
+    /// the function compiled un-inlined or has not compiled at T3).
+    pub merged_of: Vec<Option<u32>>,
     /// Statistics.
     pub stats: EngineStats,
     /// Interpreter.
@@ -135,6 +149,9 @@ impl JitEngine {
             crate::hot::trap::jit_trap_div0 as *const () as usize,
         );
         let n = funcs.len();
+        // Call-convention arities: the maximum argc over all call sites
+        // targeting each function (doc/bytecode.md). Deterministic scan.
+        let arities = compute_arities(&funcs);
         Ok(JitEngine {
             funcs,
             profiles,
@@ -152,6 +169,8 @@ impl JitEngine {
             },
             tiers: vec![Tier::Interp; n],
             compiled: (0..n).map(|_| None).collect(),
+            arities,
+            merged_of: vec![None; n],
             stats: EngineStats::default(),
             interp: Interp::new(),
         })
@@ -181,6 +200,42 @@ impl JitEngine {
         ));
         self.tiers.push(Tier::Interp);
         self.compiled.push(None);
+        self.merged_of.push(None);
+        // Re-derive the arity table (a new body may add call sites).
+        self.arities = compute_arities(&self.funcs);
+        Ok((self.funcs.len() - 1) as u32)
+    }
+
+    /// Register an engine-internal function image (the T3 inlined body).
+    ///
+    /// CEP:WHAT: Inlined-image registration.
+    /// CEP:WHY: Deopt resumes in the interpreter on bytecode whose pc and
+    ///          slot space matches the compiled code (doc/inline.md); the
+    ///          merged body must therefore live in the function table.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: verification failure (never expected for inliner
+    ///              output; fails loud, Law 6).
+    /// CEP:ASSUMES: single registration per compiled image (cached by
+    ///              owner fn id).
+    /// CEP:COST: O(1) amortized.
+    /// CEP:EVIDENCE: tests/call_inline_tests.rs deopt-resume test.
+    /// CEP:SECURITY: the image passes the same ingest verification.
+    ///
+    /// # Errors
+    /// Verification failure.
+    pub(super) fn register_image(&mut self, f: Function) -> Result<u32, EngineError> {
+        crate::cold::bytecode::verify(&f)?;
+        self.funcs.push(f);
+        self.profiles.push(ProfileData::new(
+            self.funcs.last().map(|x| x.code.len()).unwrap_or_default(),
+        ));
+        self.tiers.push(Tier::Interp);
+        self.compiled.push(None);
+        self.merged_of.push(None);
+        // The image adds no new call sites beyond the originals (spliced
+        // bodies carry the callees' own calls), but re-deriving is cheap
+        // and keeps the invariant mechanical.
+        self.arities = compute_arities(&self.funcs);
         Ok((self.funcs.len() - 1) as u32)
     }
 
@@ -259,199 +314,6 @@ impl JitEngine {
         }
     }
 
-    /// Compile a function for its current tier.
-    ///
-    /// CEP:WHAT: Tiered compilation.
-    /// CEP:WHY: Spec 2-5: T0 templates; T1+ pipeline.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: Compilation refusals leave the tier at Interp (documented
-    ///              fallback); cache failures propagate.
-    /// CEP:ASSUMES: fn_id valid.
-    /// CEP:COST: budgeted per tier.
-    /// CEP:EVIDENCE: engine tests.
-    /// CEP:SECURITY: publication is W^X through the cache.
-    ///
-    /// # Errors
-    /// EngineError.
-    fn compile_for(&mut self, fn_id: u32) -> Result<(), EngineError> {
-        let tier = self.tiers[fn_id as usize];
-        let func = self.funcs[fn_id as usize].clone();
-        match tier {
-            Tier::T0 => {
-                let code = tier0::compile(&func, &self.lib);
-                match code {
-                    Ok(c) => {
-                        let base = self.cache.allocate(c.bytes.len() as u32)?;
-                        // CEP:UNSAFE: write of engine-generated code into
-                        // the RW window, then seal to RX.
-                        // CEP:WHAT: T0 publication.
-                        // CEP:WHY: W^X publication (38.39).
-                        // CEP:FAILURE: cache errors propagate.
-                        // CEP:ASSUMES: region writable.
-                        // CEP:COST: one memcpy + mprotect.
-                        // CEP:EVIDENCE: t0 execution tests.
-                        // CEP:SECURITY: engine-authored bytes only.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(c.bytes.as_ptr(), base, c.bytes.len());
-                        }
-                        self.cache.seal(base)?;
-                        self.compiled[fn_id as usize] = Some(CompiledFn {
-                            tier,
-                            base,
-                            entry: base as usize,
-                            code: codegen::CompiledCode {
-                                bytes: c.bytes,
-                                deopt: Vec::new(),
-                                slots: c.max_stack,
-                                return_tag: c.return_tag,
-                            },
-                            return_tag: c.return_tag,
-                        });
-                        self.stats.compiled[1] += 1;
-                    }
-                    Err(_) => {
-                        self.tiers[fn_id as usize] = Tier::Interp;
-                    }
-                }
-            }
-            Tier::T1 | Tier::T2 | Tier::T3 => {
-                self.compile_optimized(fn_id, tier)?;
-            }
-            Tier::Interp => {}
-        }
-        Ok(())
-    }
-
-    /// Run the IR pipeline (spec 3.2/4/5 passes) and lower to machine code.
-    ///
-    /// CEP:WHAT: Optimized compilation (T1-T3).
-    /// CEP:WHY: Spec 3.1: bytecode -> Sea of Nodes -> optimizations ->
-    ///          machine code.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: Lift/verify/pass failures fall back to Interp
-    ///              (documented); budget failures likewise.
-    /// CEP:ASSUMES: verified bytecode; single mutator.
-    /// CEP:COST: budgeted (38.39).
-    /// CEP:EVIDENCE: differential tests prove optimized tiers match the
-    ///               interpreter bit-for-bit.
-    /// CEP:SECURITY: the verifier gates every pass; publication is W^X.
-    ///
-    /// # Errors
-    /// Cache failures propagate; pipeline failures fall back.
-    fn compile_optimized(&mut self, fn_id: u32, tier: Tier) -> Result<(), EngineError> {
-        let func = self.funcs[fn_id as usize].clone();
-        let lifted = match ir::lift(&func, self.budgets.max_ir_nodes) {
-            Ok(l) => l,
-            Err(LiftError::UnsupportedOpcode(_)) | Err(LiftError::UnbalancedStack) => {
-                // Outside the IR subset: stay on the interpreter/T0
-                // (documented Known Limitation, doc/ir.md).
-                self.tiers[fn_id as usize] = Tier::Interp;
-                return Ok(());
-            }
-            Err(e) => {
-                let _ = e;
-                self.tiers[fn_id as usize] = Tier::Interp;
-                return Ok(());
-            }
-        };
-        // Explicit, versioned pass pipeline (standard 38.20).
-        let ir::Lifted { mut graph, deopt_sites: mut sites } = lifted;
-        for name in passes::passes_for_tier(match tier {
-            Tier::T1 => 1,
-            Tier::T2 => 2,
-            _ => 3,
-        }) {
-            if *name == "verify" {
-                ir::verify(&graph).map_err(EngineError::IrVerificationFailed)?;
-            } else {
-                passes::run_pass(name, &mut graph, &mut sites, &self.pass_budgets)
-                    .map_err(EngineError::IrVerificationFailed)?;
-            }
-        }
-        ir::verify(&graph).map_err(EngineError::IrVerificationFailed)?;
-
-        // Callees must be compiled before callers resolve call addresses.
-        self.compile_callees_of(&func)?;
-        let callee_addrs: Vec<usize> = (0..self.funcs.len())
-            .map(|i| {
-                self.compiled[i]
-                    .as_ref()
-                    .map(|c| c.entry)
-                    .unwrap_or_default()
-            })
-            .collect();
-        let helper = Helpers {
-            fmod: crate::hot::runtime::jit_fmod as *const () as usize,
-            trap_div0: crate::hot::trap::jit_trap_div0 as *const () as usize,
-            trap_bounds: crate::hot::trap::jit_trap_bounds as *const () as usize,
-            alloc: crate::hot::runtime::jit_alloc as *const () as usize,
-            store_elem: crate::hot::runtime::jit_store_elem as *const () as usize,
-            load_elem: crate::hot::runtime::jit_load_elem as *const () as usize,
-            poll: crate::hot::runtime::jit_safepoint_poll as *const () as usize,
-        };
-        let code = codegen::lower(&graph, &sites, self.target.avx2, &helper, &callee_addrs)?;
-        let base = self.cache.allocate(code.bytes.len() as u32)?;
-        // CEP:UNSAFE: write of engine-generated code into the RW window.
-        // CEP:WHAT: T1+ publication.
-        // CEP:WHY: W^X (38.39).
-        // CEP:FAILURE: cache errors propagate.
-        // CEP:ASSUMES: region writable.
-        // CEP:COST: one memcpy + mprotect.
-        // CEP:EVIDENCE: differential execution tests.
-        // CEP:SECURITY: engine-authored bytes only.
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.bytes.as_ptr(), base, code.bytes.len());
-        }
-        self.cache.seal(base)?;
-        let idx = match tier {
-            Tier::T1 => 2,
-            Tier::T2 => 3,
-            _ => 4,
-        };
-        self.stats.compiled[idx] += 1;
-        let return_tag = code.return_tag;
-        self.compiled[fn_id as usize] = Some(CompiledFn {
-            tier,
-            base,
-            entry: base as usize,
-            code,
-            return_tag,
-        });
-        Ok(())
-    }
-
-    /// Compile all callees referenced by `func` (post-order).
-    ///
-    /// CEP:WHAT: Callee-first compilation.
-    /// CEP:WHY: Call addresses must resolve at lowering time.
-    /// CEP:STATUS: complete
-    /// CEP:FAILURE: unresolved callees produce a lowering error.
-    /// CEP:ASSUMES: acyclic call graphs (single-block inlining contract).
-    /// CEP:COST: O(callees).
-    /// CEP:EVIDENCE: call tests.
-    /// CEP:SECURITY: none
-    ///
-    /// # Errors
-    /// Propagates compile failures.
-    fn compile_callees_of(&mut self, func: &Function) -> Result<(), EngineError> {
-        let mut callees: Vec<u32> = Vec::new();
-        for insn in &func.code {
-            if insn.op == Opcode::Call
-                && let crate::cold::bytecode::Operand::U64(packed) = insn.operand {
-                    let callee = (packed & 0xFFFF_FFFF) as u32;
-                    callees.push(callee);
-                }
-        }
-        for c in callees {
-            if self.compiled[c as usize].is_none() && self.tiers[c as usize] != Tier::Interp {
-                let tier = self.tiers[c as usize];
-                self.compile_for(c)?;
-                let _ = tier;
-            }
-        }
-        Ok(())
-    }
-
     /// Execute a compiled function, handling traps (deopt) and returns.
     ///
     /// CEP:WHAT: Compiled execution with trap handling.
@@ -507,11 +369,15 @@ impl JitEngine {
                     ));
                 }
                 // Map the trap site to a deopt record and reconstruct.
+                // The record's pc and slot space belong to the image the
+                // code was compiled from (fn_id or the registered T3
+                // inlined body, doc/inline.md).
                 let cf = self.compiled[fn_id as usize].as_ref().ok_or({
                     EngineError::DeoptFailed("compiled code vanished mid-trap")
                 })?;
+                let interp_fn = cf.interp_fn;
                 let (bc_pc, mut new_frames) =
-                    deopt::reconstruct(&self.interp, &cf.code, &state, &self.funcs, fn_id)?;
+                    deopt::reconstruct(&self.interp, &cf.code, &state, &self.funcs, interp_fn)?;
                 // The interpreter resumes at the trapping instruction; the
                 // frame's stack holds the values below its operands.
                 if let Some(f) = new_frames.first_mut() {
@@ -600,7 +466,8 @@ impl JitEngine {
         // safepoint record (doc/osr.md Algorithm).
         let _ = host;
         let func = self.funcs[fn_id as usize].clone();
-        let lifted = match ir::lift(&func, self.budgets.max_ir_nodes) {
+        let arity = self.arities[fn_id as usize] as usize;
+        let lifted = match ir::lift_with_arity(&func, arity, self.budgets.max_ir_nodes) {
             Ok(l) => l,
             Err(_) => return Ok(None), // stay interpreted (documented)
         };
@@ -612,6 +479,17 @@ impl JitEngine {
                 passes::run_pass(name, &mut graph, &mut sites, &self.pass_budgets)
                     .map_err(EngineError::IrVerificationFailed)?;
             }
+        }
+        // OSR lowering carries no call addresses: a graph containing
+        // calls refuses and interpretation continues (the documented
+        // fallback; calls at the OSR tier are a Known Limitation in
+        // doc/inline.md).
+        if graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, ir::NodeKind::Call { .. }))
+        {
+            return Ok(None);
         }
         let helper = Helpers {
             fmod: crate::hot::runtime::jit_fmod as *const () as usize,
@@ -656,6 +534,7 @@ impl JitEngine {
             entry: base as usize,
             code,
             return_tag,
+            interp_fn: fn_id,
         });
         self.tiers[fn_id as usize] = Tier::T2;
         self.stats.osr_entries += 1;
@@ -683,3 +562,4 @@ impl JitEngine {
         self.tiers[fn_id as usize] = Tier::Interp;
     }
 }
+

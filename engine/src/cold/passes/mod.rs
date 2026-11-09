@@ -50,6 +50,10 @@ pub mod unroll;
 pub mod vectorize;
 
 /// The canonical versioned pipeline order (standard 38.20).
+///
+/// Inlining (spec 5.2.1) is NOT a pipeline pass: it transforms bytecode
+/// before the lift (engine/src/cold/inline.rs), so the graph the pipeline
+/// sees is already merged. The engine drives it only at T3.
 pub const PIPELINE_V1: &[&str] = &[
     "const-fold",
     "local-vn",
@@ -61,7 +65,6 @@ pub const PIPELINE_V1: &[&str] = &[
     "pea",
     "unroll",
     "vectorize",
-    "inline",
     "const-fold",
     "dce",
 ];
@@ -158,7 +161,6 @@ pub fn run_pass(
         "pea" => pea::pea(g, sites),
         "unroll" => unroll::unroll(g, sites, budgets),
         "vectorize" => vectorize::vectorize(g, sites, budgets),
-        "inline" => Ok(()), // driven by the engine at lift time; see engine.rs
         "verify" => ir::verify(g),
         _ => Err(format!("unknown pass: {name}")),
     }

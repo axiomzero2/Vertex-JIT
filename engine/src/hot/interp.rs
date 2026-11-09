@@ -170,6 +170,50 @@ impl Interp {
             locals,
         })
     }
+
+    /// Build the callee frame for a `Call`, binding the caller's arguments.
+    ///
+    /// CEP:WHAT: Call-frame construction (the call convention's bind step).
+    /// CEP:WHY: The convention (doc/bytecode.md) pops `argc` arguments off
+    ///          the caller's stack (top = last) and binds them to the
+    ///          callee's locals 0..argc; every tier must agree on the
+    ///          binding, so it lives next to make_frame.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: TypeMismatch when argc exceeds the callee's locals;
+    ///              StackUnderflow on a short argument stack; OutOfMemory
+    ///              on capacity.
+    /// CEP:ASSUMES: `caller` is the top frame (the call's caller).
+    /// CEP:COST: O(argc).
+    /// CEP:EVIDENCE: tests/call_inline_tests.rs argument-order test.
+    /// CEP:SECURITY: every push is capacity-checked.
+    ///
+    /// # Errors
+    /// EngineError per the failure list.
+    pub fn bind_call_frame(
+        &self,
+        callee: u32,
+        callee_fn: &Function,
+        caller: &mut FnFrame,
+        argc: usize,
+    ) -> Result<FnFrame, EngineError> {
+        if argc > callee_fn.locals.len() {
+            return Err(EngineError::TypeMismatch("CALL arity exceeds callee locals"));
+        }
+        let mut args = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            let v = caller.stack.pop().ok_or(EngineError::StackUnderflow)?;
+            args.push(v);
+        }
+        let mut new_frame = self.make_frame(callee, callee_fn)?;
+        for (i, v) in args.iter().rev().enumerate() {
+            let slot = new_frame
+                .locals
+                .get_mut(i)
+                .ok_or(EngineError::PcOutOfRange(i))?;
+            slot.push(*v).ok_or(EngineError::OutOfMemory)?;
+        }
+        Ok(new_frame)
+    }
 }
 
 impl Default for Interp {

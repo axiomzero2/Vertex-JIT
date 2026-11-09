@@ -120,6 +120,13 @@ pub enum NodeKind {
         /// Local slot merged.
         slot: u16,
     },
+    /// Incoming parameter; one per argument slot 0..arity at function
+    /// entry (doc/bytecode.md call convention). The word arrives in the
+    /// ABI register assigned to the parameter index.
+    Param {
+        /// Parameter index (== the local slot it binds).
+        slot: u16,
+    },
     // ---- arrays (engine extension opcodes) ----
     /// Allocate a zero-initialized array; inputs: length.
     NewArray,
@@ -258,6 +265,7 @@ impl Graph {
                 | NodeKind::Eq
                 | NodeKind::Or
                 | NodeKind::Phi { .. }
+                | NodeKind::Param { .. }
                 | NodeKind::ArrayLen
                 | NodeKind::VecLoad { .. }
                 | NodeKind::VecAddConst { .. }
@@ -335,6 +343,7 @@ impl Graph {
                 NodeKind::Eq => out.push_str("Eq"),
                 NodeKind::Or => out.push_str("Or"),
                 NodeKind::Phi { slot } => out.push_str(&format!("Phi({slot})")),
+                NodeKind::Param { slot } => out.push_str(&format!("Param({slot})")),
                 NodeKind::NewArray => out.push_str("NewArray"),
                 NodeKind::LoadIdx => out.push_str("LoadIdx"),
                 NodeKind::StoreIdx => out.push_str("StoreIdx"),
@@ -422,6 +431,31 @@ pub fn lift(
     func: &crate::cold::bytecode::Function,
     max_nodes: u32,
 ) -> Result<Lifted, LiftError> {
+    lift_with_arity(func, 0, max_nodes)
+}
+
+/// Lift with an explicit parameter count.
+///
+/// CEP:WHAT: Graph builder entry with the call convention's arity.
+/// CEP:WHY: The bytecode model carries no arity field; the engine derives
+///          it from the call sites (doc/bytecode.md) and passes it here.
+///          Parameters bind locals 0..arity as Param nodes at entry.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: LiftError as for lift.
+/// CEP:ASSUMES: arity <= locals.len(); larger arities fail at the first
+///              Slot operand (LoadVar on an out-of-range env index is
+///              unreachable because bytecode::verify bounds slots).
+/// CEP:COST: as lift.
+/// CEP:EVIDENCE: tests/call_inline_tests.rs (param lifting, execution).
+/// CEP:SECURITY: as lift.
+///
+/// # Errors
+/// See `lift`.
+pub fn lift_with_arity(
+    func: &crate::cold::bytecode::Function,
+    arity: usize,
+    max_nodes: u32,
+) -> Result<Lifted, LiftError> {
     use crate::cold::bytecode::{Insn, Opcode, Operand};
     let n = func.code.len();
     // ---- CFG: leaders, partitioning, loop headers ----
@@ -498,7 +532,6 @@ pub fn lift(
     let mut entry_env: Vec<Option<Vec<NodeId>>> = vec![None; block_count];
     let mut extra: Vec<Vec<PendingEdge>> = vec![Vec::new(); block_count];
     entry_ctrl[0] = Some(start);
-    let mut env: Vec<NodeId> = vec![NodeId(u32::MAX); func.locals.len()];
 
     macro_rules! CEP_BUDGET_CHECK {
         () => {
@@ -506,6 +539,14 @@ pub fn lift(
                 return Err(LiftError::TooManyNodes);
             }
         };
+    }
+
+    // Parameters: locals 0..arity bind Param nodes at entry (doc/bytecode.md
+    // call convention); every other local starts undefined.
+    let mut env: Vec<NodeId> = vec![NodeId(u32::MAX); func.locals.len()];
+    for (s, e) in env.iter_mut().enumerate().take(arity.min(func.locals.len())) {
+        CEP_BUDGET_CHECK!();
+        *e = g.alloc(NodeKind::Param { slot: s as u16 }, Vec::new(), BlockId(0), VType::Num);
     }
 
     for bi in 0..block_count {
@@ -677,6 +718,9 @@ pub fn lift(
                         Opcode::Equal => NodeKind::Eq,
                         Opcode::Div => {
                             // Guard: right == 0 -> uncommon trap (spec 5.7.2).
+                            // The trap call is emitted inside the Div arm in
+                            // codegen, so the deopt record keys on the Div
+                            // node (see the record_site after the alloc).
                             CEP_BUDGET_CHECK!();
                             let zero = g.alloc(NodeKind::ConstNum(0.0), Vec::new(), BlockId(bi as u32), VType::Num);
                             CEP_BUDGET_CHECK!();
@@ -688,13 +732,12 @@ pub fn lift(
                             CEP_BUDGET_CHECK!();
                             let f = g.alloc(NodeKind::IfFalse, vec![ifn], BlockId(bi as u32), VType::Control);
                             CEP_BUDGET_CHECK!();
-                            let trap = g.alloc(
+                            let _trap = g.alloc(
                                 NodeKind::UncommonTrap { reason: DeoptReason::DivisionByZero },
                                 vec![t],
                                 BlockId(bi as u32),
                                 VType::Control,
                             );
-                            record_site(&g, &mut deopt_sites, trap, pc as u32, &stack, &env);
                             ctrl = f;
                             NodeKind::Div
                         }
@@ -706,7 +749,21 @@ pub fn lift(
                         VType::Num
                     };
                     CEP_BUDGET_CHECK!();
+                    let is_div = matches!(kind, NodeKind::Div);
                     let nid = g.alloc(kind, vec![x, y], BlockId(bi as u32), ty);
+                    if is_div {
+                        // The div guard's deopt record: keyed on the value
+                        // node (codegen emits the trap in the Div arm, so
+                        // the record's trap_ret_offsets must match this
+                        // node), and the operands stay on the recorded
+                        // stack — the interpreter resumes at this very
+                        // instruction and re-executes it (doc/deopt.md).
+                        stack.push(x);
+                        stack.push(y);
+                        record_site(&g, &mut deopt_sites, nid, pc as u32, &stack, &env);
+                        stack.pop();
+                        stack.pop();
+                    }
                     stack.push(nid);
                 }
                 Opcode::NewArray => {
@@ -748,9 +805,19 @@ pub fn lift(
                         BlockId(bi as u32),
                         VType::Control,
                     );
-                    record_site(&g, &mut deopt_sites, trap, pc as u32, &stack, &env);
+                    let _ = trap;
                     CEP_BUDGET_CHECK!();
                     let nid = g.alloc(NodeKind::LoadIdx, vec![arr, idx], BlockId(bi as u32), VType::Num);
+                    // The bounds guard's deopt record: keyed on the value
+                    // node (codegen emits the trap in the LoadIdx arm) with
+                    // the operands back on the recorded stack — the
+                    // interpreter resumes at this instruction and
+                    // re-executes it (doc/deopt.md).
+                    stack.push(arr);
+                    stack.push(idx);
+                    record_site(&g, &mut deopt_sites, nid, pc as u32, &stack, &env);
+                    stack.pop();
+                    stack.pop();
                     stack.push(nid);
                     ctrl = f;
                 }
@@ -781,9 +848,21 @@ pub fn lift(
                         BlockId(bi as u32),
                         VType::Control,
                     );
-                    record_site(&g, &mut deopt_sites, trap, pc as u32, &stack, &env);
+                    let _ = trap;
                     CEP_BUDGET_CHECK!();
-                    let _ = g.alloc(NodeKind::StoreIdx, vec![arr, idx, val], BlockId(bi as u32), VType::Unit);
+                    let nid = g.alloc(NodeKind::StoreIdx, vec![arr, idx, val], BlockId(bi as u32), VType::Unit);
+                    // The bounds guard's deopt record: keyed on the value
+                    // node (codegen emits the trap in the StoreIdx arm)
+                    // with the operands back on the recorded stack — the
+                    // interpreter resumes at this instruction and
+                    // re-executes it (doc/deopt.md).
+                    stack.push(arr);
+                    stack.push(idx);
+                    stack.push(val);
+                    record_site(&g, &mut deopt_sites, nid, pc as u32, &stack, &env);
+                    stack.pop();
+                    stack.pop();
+                    stack.pop();
                     ctrl = f;
                 }
                 Opcode::Jump => {

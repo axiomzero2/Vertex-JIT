@@ -15,6 +15,7 @@ Documents:
 | [code-cache.md](code-cache.md) | W^X executable code cache |
 | [ir.md](ir.md) | Sea of Nodes IR: graph, builder, verifier |
 | [passes.md](passes.md) | Optimization pass pipeline per tier |
+| [inline.md](inline.md) | Cross-function inlining at T3 |
 | [codegen.md](codegen.md) | IR to x86-64 lowering and runtime ABI |
 | [deopt.md](deopt.md) | Deoptimization and frame reconstruction |
 | [gc.md](gc.md) | GC heap, barriers and safepoints |

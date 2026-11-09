@@ -13,9 +13,10 @@
 // CEP:HPC-IR: Consumes deopt sites produced by the builder and slot maps
 //             produced by codegen.
 // CEP:HPC-DETERMINISM: deterministic.
-// CEP:ASSUMES: the machine frame matches the compiled layout (saved rbp at
-//              [rbp], slots at [rbp - 8*(slot+1)]); the trap return address
-//              identifies the site (doc/deopt.md).
+// CEP:ASSUMES: the compiled frame image rides in the TrapState (captured
+//              at trap time, before the longjmp — the engine's own frames
+//              reuse the machine stack region afterwards); slot i of the
+//              image holds the word at [rbp - 8*(i+1)] (doc/deopt.md).
 // CEP:COST: O(stack + locals) per trap; cold.
 // CEP:EVIDENCE: tests/deopt_tests.rs.
 // CEP:SECURITY: frame pointers validated against the code metadata before
@@ -65,7 +66,7 @@ pub fn reconstruct(
     else {
         return Err(EngineError::DeoptFailed("no deopt record for trap site"));
     };
-    reconstruct_from_record(interp, rec, state.rbp, state.rsp, funcs, fn_id)
+    reconstruct_from_record(interp, rec, state.rbp, state.rsp, &state.frame, funcs, fn_id)
 }
 
 /// Reconstruct from an explicit record (shared by guards and OSR).
@@ -74,18 +75,21 @@ pub fn reconstruct(
 /// CEP:WHY: Guards, safepoints and OSR entries share the layout.
 /// CEP:STATUS: complete
 /// CEP:FAILURE: DeoptFailed on shape mismatch.
-/// CEP:ASSUMES: machine frame layout per the module header.
+/// CEP:ASSUMES: `frame_image` was captured at trap time (before the
+///              longjmp); slot i of the image is [rbp - 8*(i+1)].
 /// CEP:COST: O(stack + locals).
-/// CEP:EVIDENCE: tests/deopt_tests.rs.
+/// CEP:EVIDENCE: tests/call_inline_tests.rs deopt-resume test.
 /// CEP:SECURITY: shape check rejects foreign frames.
 ///
 /// # Errors
 /// DeoptFailed.
+#[allow(clippy::too_many_arguments)]
 pub fn reconstruct_from_record(
     interp: &Interp,
     rec: &DeoptRecord,
     rbp: usize,
     rsp: usize,
+    frame_image: &[u64],
     funcs: &[crate::cold::bytecode::Function],
     fn_id: u32,
 ) -> Result<(u32, Vec<FnFrame>), EngineError> {
@@ -96,9 +100,10 @@ pub fn reconstruct_from_record(
         return Err(EngineError::DeoptFailed("frame shape mismatch"));
     }
     let mut frame = interp.make_frame(fn_id, func)?;
-    // Locals: read machine slots into the interpreter binding stacks.
+    // Locals: read the captured frame image into the interpreter binding
+    // stacks.
     for (slot, mslot, tag) in &rec.locals {
-        let word = read_slot(rbp, *mslot)?;
+        let word = read_slot(frame_image, *mslot)?;
         let v = Value::decode_typed(word, *tag);
         let binding = frame
             .locals
@@ -110,7 +115,7 @@ pub fn reconstruct_from_record(
     }
     // Value stack: each recorded logical value lives in its machine slot.
     for (mslot, tag) in &rec.stack {
-        let word = read_slot(rbp, *mslot)?;
+        let word = read_slot(frame_image, *mslot)?;
         let v = Value::decode_typed(word, *tag);
         if frame.stack.push(v).is_none() {
             return Err(EngineError::DeoptFailed("value stack capacity"));
@@ -119,30 +124,22 @@ pub fn reconstruct_from_record(
     Ok((rec.bc_pc, vec![frame]))
 }
 
-/// Read one machine frame slot.
+/// Read one machine frame slot from the captured frame image.
 ///
 /// CEP:WHAT: Slot read.
 /// CEP:WHY: Reconstruction reads compiled values.
 /// CEP:STATUS: complete
-/// CEP:FAILURE: DeoptFailed below the stack region.
-/// CEP:ASSUMES: layout per module header.
-/// CEP:COST: one load.
-/// CEP:EVIDENCE: deopt tests.
-/// CEP:SECURITY: slot bounds checked.
+/// CEP:FAILURE: DeoptFailed beyond the captured frame.
+/// CEP:ASSUMES: slot i of the image holds [rbp - 8*(i+1)] at trap time.
+/// CEP:COST: one index.
+/// CEP:EVIDENCE: tests/call_inline_tests.rs deopt-resume test.
+/// CEP:SECURITY: bounds checked against the capture.
 ///
 /// # Errors
 /// DeoptFailed.
-fn read_slot(rbp: usize, slot: u32) -> Result<u64, EngineError> {
-    let addr = rbp
-        .checked_sub(8 * (slot as usize + 1))
-        .ok_or(EngineError::DeoptFailed("slot below stack"))?;
-    // CEP:UNSAFE: read of the trapped machine frame.
-    // CEP:WHAT: Frame slot read.
-    // CEP:WHY: Reconstruction reads compiled values.
-    // CEP:FAILURE: address validated above.
-    // CEP:ASSUMES: the frame pointer is the compiled function's rbp.
-    // CEP:COST: one load.
-    // CEP:EVIDENCE: deopt tests.
-    // CEP:SECURITY: reads only engine-generated frame memory.
-    Ok(unsafe { (addr as *const u64).read() })
+fn read_slot(frame_image: &[u64], slot: u32) -> Result<u64, EngineError> {
+    frame_image
+        .get(slot as usize)
+        .copied()
+        .ok_or(EngineError::DeoptFailed("slot beyond the captured frame"))
 }

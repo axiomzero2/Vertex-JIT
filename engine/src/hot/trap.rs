@@ -49,7 +49,7 @@ pub enum TrapKind {
 }
 
 /// State a trap hands back to the engine trampoline.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TrapState {
     /// Which trap fired.
     pub kind: TrapKind,
@@ -61,6 +61,12 @@ pub struct TrapState {
     pub ret: usize,
     /// Code base recorded by the trampoline (engine-validated).
     pub code_base: usize,
+    /// The compiled frame image, captured here at trap time: slot i holds
+    /// the word at [rbp - 8*(i+1)] for i in 0..(rbp-rsp)/8. The capture is
+    /// mandatory — after the longjmp the engine's own Rust frames occupy
+    /// the same stack region, so reads at reconstruct time would see the
+    /// engine's own locals, not the compiled frame (doc/deopt.md).
+    pub frame: Vec<u64>,
 }
 
 /// True when the trap happened in the trampoline-called function itself
@@ -80,19 +86,27 @@ pub struct TrapState {
 pub fn is_single_machine_frame(state: &TrapState) -> bool {
     TRAMPOLINE.with(|t| {
         let t = t.borrow();
-        if t.tramp_frame == 0 || state.rbp == 0 {
+        if t.call_rsp == 0 || state.rbp == 0 {
             return false;
         }
-        // CEP:UNSAFE: read of the saved rbp at the trap frame.
-        // CEP:WHAT: Chain termination check.
-        // CEP:WHY: See above.
-        // CEP:FAILURE: returns false on mismatch.
-        // CEP:ASSUMES: engine-generated frames only.
-        // CEP:COST: one load.
-        // CEP:EVIDENCE: deopt tests.
-        // CEP:SECURITY: reads engine frame memory only.
-        let saved = unsafe { (state.rbp as *const u64).read() } as usize;
-        saved == t.tramp_frame
+        // The compiled entry's rbp is deterministic in rsp: the trampoline
+        // captured call_rsp immediately before the call, and the entry's
+        // prologue pushes the return address (8) and the caller's rbp (8),
+        // so a single machine frame satisfies rbp == call_rsp - 16. A
+        // machine-called callee sits deeper and fails the equality (the
+        // cross-frame case stays fail-loud, CEP-ENGINE-013).
+        // CEP:WHAT: Frame-depth check (rsp-anchored).
+        // CEP:WHY: rbp is a general register in release builds and cannot
+        //          anchor the check; the saved-rbp comparison silently
+        //          depended on frame-pointer assumptions.
+        // CEP:FAILURE: false for multi-frame traps.
+        // CEP:ASSUMES: the compiled entry's first two instructions are
+        //              push rbp; mov rbp, rsp (the engine's prologue).
+        // CEP:COST: O(1).
+        // CEP:EVIDENCE: tests/call_inline_tests.rs deopt-resume test;
+        //              tests/t0_exec.rs trap tests.
+        // CEP:SECURITY: prevents silent mis-reconstruction.
+        state.rbp == t.call_rsp.wrapping_sub(16)
     })
 }
 
@@ -122,6 +136,11 @@ pub(crate) struct Trampoline {
     ret_word: u64,
     code_base: usize,
     tramp_frame: usize,
+    /// rsp immediately before the compiled entry call: the entry's frame
+    /// starts exactly 16 bytes below it (return address push + rbp push).
+    /// rsp is the anchor for the single-machine-frame check — unlike rbp,
+    /// the compiler maintains it precisely at every call site.
+    call_rsp: usize,
 }
 
 // SAFETY: raw pointers are engine-owned and used only on the owning thread.
@@ -164,15 +183,14 @@ pub fn with_trampoline(heap: &mut Heap, code_base: usize, entry: usize) -> Resul
             t.ret_word = 0;
             t.code_base = code_base;
         }
-        // Capture this frame's pointer for the single-machine-frame check:
-        // the compiled callee's prologue saves exactly this rbp value.
+        // Capture this frame's pointer for diagnostics; the real anchor
+        // for the single-machine-frame check is call_rsp (below): rbp is
+        // a general register in release builds and cannot anchor it.
         // CEP:UNSAFE: reads the current frame pointer register.
         // CEP:WHAT: Frame-pointer capture.
-        // CEP:WHY: The trap-depth check compares the callee's saved rbp
-        //          against the trampoline's rbp.
+        // CEP:WHY: Kept for cross-checks and debugging.
         // CEP:FAILURE: none; a register read.
-        // CEP:ASSUMES: frame pointers enabled (default; the crate never
-        //              disables them).
+        // CEP:ASSUMES: none (the value is advisory).
         // CEP:COST: one register move.
         // CEP:EVIDENCE: deopt tests.
         // CEP:SECURITY: read-only register access.
@@ -184,13 +202,31 @@ pub fn with_trampoline(heap: &mut Heap, code_base: usize, entry: usize) -> Resul
         let rc = unsafe { setjmp(&mut buf) };
         let outcome = if rc == 0 {
             // Normal path: call the compiled entry; rax is the value word.
+            // Capture rsp immediately before the call: the entry's rbp is
+            // exactly call_rsp - 16 (return-address push + rbp push),
+            // which anchors the single-machine-frame check (doc/deopt.md).
+            // CEP:UNSAFE: reads the current stack pointer register.
+            // CEP:WHAT: Call-site rsp capture.
+            // CEP:WHY: The compiled entry's frame position is deterministic
+            //          in rsp; the check must not guess.
+            // CEP:FAILURE: none; a register read.
+            // CEP:ASSUMES: no rsp adjustment between this read and the
+            //              call (the compiler emits them adjacently).
+            // CEP:COST: one register move.
+            // CEP:EVIDENCE: tests/call_inline_tests.rs deopt-resume test.
+            // CEP:SECURITY: read-only register access.
+            let call_rsp: usize;
+            unsafe {
+                core::arch::asm!("mov {}, rsp", out(reg) call_rsp, options(nomem, nostack))
+            };
+            t.borrow_mut().call_rsp = call_rsp;
             let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(entry) };
             let word = f();
             TrampOutcome::Returned(word)
         } else {
             let t = t.borrow();
-            match t.trap {
-                Some(s) => TrampOutcome::Trapped(s),
+            match &t.trap {
+                Some(s) => TrampOutcome::Trapped(s.clone()),
                 None => return Err(EngineError::DeoptFailed("trap without state")),
             }
         };
@@ -244,12 +280,38 @@ pub extern "C" fn jit_trap(kind: u64, rbp: usize, rsp: usize) -> ! {
     // CEP:EVIDENCE: deopt tests.
     // CEP:SECURITY: read of the engine's own stack only.
     let ret = unsafe { ((rsp - 8) as *const u64).read() } as usize;
+    // Capture the compiled frame image BEFORE the longjmp: after the jump
+    // the engine's own frames reuse this stack region, so reconstruct-time
+    // reads would see engine locals instead (doc/deopt.md).
+    // CEP:UNSAFE: read of the engine-generated frame below rbp.
+    // CEP:WHAT: Frame image capture.
+    // CEP:WHY: Deopt reconstruction needs the compiled values after the
+    //          longjmp has invalidated the machine stack region. Slot i
+    //          lives at [rbp - 8*(i+1)]: the image is read in that order
+    //          so its indexes match codegen's slot map exactly.
+    // CEP:FAILURE: none; the region is the trap site's own frame.
+    // CEP:ASSUMES: rsp <= rbp and 8-byte alignment (compiled prologues).
+    // CEP:COST: one copy of the frame (cold path).
+    // CEP:EVIDENCE: tests/call_inline_tests.rs deopt-resume test.
+    // CEP:SECURITY: reads only the engine's own compiled frame.
+    let frame: Vec<u64> = if rbp > rsp && (rbp - rsp).is_multiple_of(8) {
+        let n = (rbp - rsp) / 8;
+        let mut v = Vec::with_capacity(n);
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n {
+            v.push(unsafe { ((rbp - 8 * (i + 1)) as *const u64).read() });
+        }
+        v
+    } else {
+        Vec::new()
+    };
     let state = TrapState {
         kind: if kind == 0 { TrapKind::DivideByZero } else { TrapKind::BoundsCheck },
         rbp,
         rsp,
         ret,
         code_base: 0,
+        frame,
     };
     let _ = state.code_base;
     TRAMPOLINE.with(|t| {

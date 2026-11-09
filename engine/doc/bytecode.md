@@ -34,10 +34,33 @@ jump targets, u32 length plus bytes for variable names), resolves variable
 names to slots in first-use order, and rejects truncation, unknown opcodes
 and invalid UTF-8 with typed errors. After decoding it runs `verify`.
 
+## The Call Convention (engine extension)
+
+The engine's CALL/RET extension replaces the legacy `PushUsize`/`Jump`/
+`JumpLastOnStack` call shape (which stays decoded but lifts nowhere):
+
+1. `Call` packs its operand as `(argc << 32) | callee`, where `callee` is a
+   function-table index and `argc` the argument count.
+2. The caller pushes the arguments left to right, so the top of the operand
+   stack is the last argument.
+3. The callee binds its locals `0..argc` to the arguments in order; its
+   remaining locals start empty.
+4. `Ret` pops one value and returns it to the caller (the entry function
+   may also `Ret`; `Exit::Returned` carries the value).
+5. A function's call-convention arity is the maximum `argc` over all call
+   sites targeting it; the engine derives the table
+   (`JitEngine::arities`) and the lift builder emits one `Param` node per
+   parameter slot. The interpreter rejects a call whose `argc` exceeds the
+   callee's local count.
+6. T0 does not implement `Call`: a caller whose body calls stays on the
+   interpreter or compiles at T1+.
+
 ## Invariants
 
-1. Every decoded function contains at least one Halt; the verifier rejects
-   functions without one.
+1. Every decoded function carries a terminator: at least one `Halt`
+   (program end, the legacy single-function shape) or `Ret` (activation
+   end, the call convention above). The verifier rejects functions with
+   neither.
 2. Every Target and Slot operand is in range after `verify`.
 3. Slot indices are dense and assigned in first-use order, which makes slot
    numbering a deterministic function of the bytecode.

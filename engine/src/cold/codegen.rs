@@ -366,6 +366,21 @@ fn proj_true(g: &Graph, ifn: NodeId) -> NodeId {
     NodeId(u32::MAX)
 }
 
+/// ABI argument registers for the engine's call convention (System V
+/// integer registers), indexed by parameter position (doc/codegen.md).
+/// CEP:WHAT: Call ABI register table.
+/// CEP:WHY: Call sites and Param lowering must agree on the register for
+///              each argument position; a shared constant pins it.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: System V AMD64.
+/// CEP:COST: zero (const).
+/// CEP:EVIDENCE: call execution tests (tests/call_inline_tests.rs).
+/// CEP:SECURITY: none
+const ARG_REGS: [u8; ARG_REGS_LEN] = [7, 6, 2, 1, 8, 9]; // rdi,rsi,rdx,rcx,r8,r9
+/// Length of the ABI argument register table (maximum parameter count).
+const ARG_REGS_LEN: usize = 6;
+
 /// Load a frame slot into rax (disp32).
 ///
 /// CEP:WHAT: Slot load.
@@ -578,6 +593,18 @@ fn emit_node(
         | NodeKind::Null
         | NodeKind::Phi { .. }
         | NodeKind::If => {}
+        NodeKind::Param { slot: param } => {
+            // Incoming argument word: the caller placed it in the ABI
+            // register for this parameter index (doc/codegen.md ABI).
+            let regs = ARG_REGS;
+            let Some(r) = regs.get(*param as usize).copied() else {
+                return Err(EngineError::IrVerificationFailed(format!(
+                    "param {param} exceeds the {ARG_REGS_LEN}-register call convention"
+                )));
+            };
+            e.mov_rr(r, 0);
+            store_slot_rax(e, slot);
+        }
         NodeKind::UncommonTrap { .. } => {
             // Guards lower through the runtime helpers' own checks
             // (LoadIdx/StoreIdx/NewArray arms and the Div arm); the IR
@@ -844,15 +871,14 @@ fn emit_node(
             }
         }
         NodeKind::Call { callee } => {
-            let arg_regs = [7u8, 6, 2, 1, 8, 9]; // rdi,rsi,rdx,rcx,r8,r9
             for (i, arg) in node.inputs.iter().enumerate() {
-                if i >= arg_regs.len() {
+                if i >= ARG_REGS_LEN {
                     return Err(EngineError::IrVerificationFailed(
                         "more than 6 call arguments".to_owned(),
                     ));
                 }
                 load_slot_rax(e, slot_of[arg.0 as usize]);
-                e.mov_rr(arg_regs[i], 0);
+                e.mov_rr(ARG_REGS[i], 0);
             }
             let Some(addr) = callee_addrs.get(*callee as usize).copied() else {
                 return Err(EngineError::IrVerificationFailed(format!(
@@ -900,4 +926,3 @@ fn emit_node(
     }
     Ok(trap_rets)
 }
-// PROBE 12345

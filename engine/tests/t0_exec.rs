@@ -156,7 +156,7 @@ fn t0_div_by_zero_traps() {
     cache.seal(base).expect("seal");
     let out = with_trampoline(&mut heap, base as usize, base as usize).expect("trampoline");
     assert!(
-        matches!(out, TrampOutcome::Trapped(s) if s.kind == vertex_jit::hot::trap::TrapKind::DivideByZero),
+        matches!(out, TrampOutcome::Trapped(ref s) if s.kind == vertex_jit::hot::trap::TrapKind::DivideByZero),
         "divide by zero must trap: {out:?}"
     );
     cache.release(base);

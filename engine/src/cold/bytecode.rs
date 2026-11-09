@@ -232,7 +232,7 @@ impl fmt::Display for BytecodeError {
                 write!(f, "jump at {pc} targets {target} but len is {len}")
             }
             BytecodeError::TooManyVariables => write!(f, "more than 65535 local slots"),
-            BytecodeError::NoHalt => write!(f, "function does not end in Halt"),
+            BytecodeError::NoHalt => write!(f, "function has no terminator (Halt or Ret)"),
         }
     }
 }
@@ -244,11 +244,14 @@ pub const MAX_LOCALS: usize = u16::MAX as usize;
 /// Upper bound on string ids (u32 operands).
 pub const MAX_STRINGS: usize = u32::MAX as usize;
 
-/// Structural verifier: operand ranges and the Halt requirement.
+/// Structural verifier: operand ranges and the terminator requirement.
 ///
 /// CEP:WHAT: Validates structural invariants after decode.
 /// CEP:WHY: Tiers assume operands are in range (Law 2); this runs once
-///          before any tier sees the code.
+///          before any tier sees the code. Every function must carry a
+///          terminator: Halt ends the program (the legacy single-
+///          function shape), Ret ends an activation (the engine's call
+///          convention, doc/bytecode.md).
 /// CEP:STATUS: complete
 /// CEP:FAILURE: First violated invariant as BytecodeError.
 /// CEP:ASSUMES: none
@@ -280,7 +283,14 @@ pub fn verify(func: &Function) -> Result<(), BytecodeError> {
             Operand::None | Operand::U64(_) | Operand::F64(_) => {}
         }
     }
-    if !func.code.iter().any(|i| i.op == Opcode::Halt) {
+    // Terminator requirement: Halt ends the program, Ret ends an
+    // activation (doc/bytecode.md call convention); a function with
+    // neither cannot run to completion.
+    if !func
+        .code
+        .iter()
+        .any(|i| matches!(i.op, Opcode::Halt | Opcode::Ret))
+    {
         return Err(BytecodeError::NoHalt);
     }
     Ok(())
@@ -684,7 +694,7 @@ mod tests {
 /// CEP:COST: O(1).
 /// CEP:EVIDENCE: negative case asserted inline.
     #[test]
-    fn rejects_missing_halt() {
+    fn rejects_missing_terminator() {
         assert_eq!(decode_vertex("x", &[1u8, 1u8]), Err(BytecodeError::NoHalt));
     }
 

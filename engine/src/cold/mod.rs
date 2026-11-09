@@ -28,6 +28,11 @@ pub mod tier0_emit;
 pub mod tier0_check;
 /// Sea of Nodes IR: graph, builder, verifier (spec 3.1, standard 38.17).
 pub mod ir;
+/// Cross-function inlining for T3 (spec 5.2.1).
+pub mod inline;
+/// Tiered compilation: T0 publication, the T1-T3 pipeline, callee-first
+/// post-order and the arity table (spec 2-5).
+pub mod compile;
 /// Optimization passes (spec 3.2, 4, 5; standard 38.20).
 /// The optimization passes, one per submodule (chapter 62.3.1).
 pub mod passes;

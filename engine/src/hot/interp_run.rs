@@ -324,6 +324,12 @@ impl Interp {
                 }
                 Opcode::Call => match insn.operand {
                     Operand::U64(packed) => {
+                        // Call convention (doc/bytecode.md): the operand
+                        // packs (argc<<32)|callee; the arguments sit on
+                        // the caller's operand stack (last argument on
+                        // top) and bind the callee's locals 0..argc
+                        // (Interp::bind_call_frame).
+                        let argc = (packed >> 32) as usize;
                         let callee = (packed & 0xFFFF_FFFF) as u32;
                         if frames.len() >= self.max_call_depth {
                             return Err(EngineError::OutOfMemory);
@@ -331,8 +337,9 @@ impl Interp {
                         let Some(callee_fn) = funcs.get(callee as usize) else {
                             return Err(EngineError::PcOutOfRange(callee as usize));
                         };
-                        frames.last_mut().ok_or(EngineError::PcOutOfRange(0))?.pc += 1;
-                        let new_frame = self.make_frame(callee, callee_fn)?;
+                        let caller = frames.last_mut().ok_or(EngineError::PcOutOfRange(0))?;
+                        let new_frame = self.bind_call_frame(callee, callee_fn, caller, argc)?;
+                        caller.pc += 1;
                         frames.push(new_frame);
                     }
                     _ => return Err(EngineError::TypeMismatch("CALL without operand")),
